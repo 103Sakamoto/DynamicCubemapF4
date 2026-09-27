@@ -1,0 +1,46 @@
+{
+  "modName": "DynamicCubemapF4",
+  "displayName": "Dynamic Cubemap F4",
+  "content": [
+    {
+      "type": "section",
+      "text": "Reflections"
+    },
+    {
+      "id": "bEnabled:General",
+      "type": "switcher",
+      "text": "Dynamic reflections",
+      "help": "Enable scene-based reflections. Turn off to restore original cubemaps. Changes apply when gameplay resumes. For support, send DynamicCubemapF4.log and DynamicCubemapF4.previous.log from the game folder: Data/F4SE/Plugins. With MO2, generated files may be in Overwrite.",
+      "valueOptions": {
+        "sourceType": "ModSettingBool"
+      }
+    },
+    {
+      "id": "iRoughnessMode:General",
+      "type": "stepper",
+      "text": "Reflection softness",
+      "help": "Default: mip 2 (32x32). Sharper: mip 0 (128x128). Softer: mip 4 (8x8). Applies globally to dynamic replacement cubemaps when gameplay resumes. Each option fixes the sampled mip; material roughness cannot select another level.",
+      "valueOptions": {
+        "sourceType": "ModSettingInt",
+        "options": [
+          "Default",
+          "Sharper",
+          "Softer"
+        ]
+      }
+    },
+    {
+      "type": "section",
+      "text": "Movement"
+    },
+    {
+      "id": "bReprojection:General",
+      "type": "switcher",
+      "text": "Reproject reflections while moving",
+      "help": "Adjust captured reflections as you move. Enabling this adds GPU work and may reduce FPS while moving. Disable it to reduce the performance cost. Changing this restarts movement history. Enabled by default.",
+      "valueOptions": {
+        "sourceType": "ModSettingBool"
+      }
+    }
+  ]
+}

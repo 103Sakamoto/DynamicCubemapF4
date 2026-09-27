@@ -1,0 +1,1226 @@
+#pragma once
+
+#include <stddef.h>
+#include <stdint.h>
+
+#if defined(__cplusplus)
+#define DMUI_EXTERN_C extern "C"
+#define DMUI_NOEXCEPT noexcept
+#else
+#define DMUI_EXTERN_C extern
+#define DMUI_NOEXCEPT
+#endif
+
+#if defined(_MSC_VER)
+#define DMUI_CALL __cdecl
+#else
+#define DMUI_CALL
+#endif
+
+#if defined(_WIN32) && defined(DMUI_HOST_EXPORTS)
+#define DMUI_EXPORT DMUI_EXTERN_C __declspec(dllexport)
+#else
+#define DMUI_EXPORT DMUI_EXTERN_C
+#endif
+
+#define DMUI_MAKE_VERSION(major, minor) ((((uint32_t)(major)) << 16u) | ((uint32_t)(minor)))
+#define DMUI_VERSION_MAJOR(version) ((uint32_t)(version) >> 16u)
+#define DMUI_VERSION_MINOR(version) ((uint32_t)(version) & 0xFFFFu)
+
+#define DMUI_API_VERSION_0_1 DMUI_MAKE_VERSION(0u, 1u)
+#define DMUI_API_VERSION_CURRENT DMUI_API_VERSION_0_1
+#define DMUI_HOST_ABI_1 1u
+#define DMUI_HOST_ABI_CURRENT DMUI_HOST_ABI_1
+
+typedef uint32_t DMUI_Result;
+
+#define DMUI_RESULT_OK 0u
+#define DMUI_RESULT_UNSUPPORTED_ABI 1u
+#define DMUI_RESULT_INVALID_ARGUMENT 2u
+#define DMUI_RESULT_STRUCT_TOO_SMALL 3u
+#define DMUI_RESULT_INVALID_DESCRIPTOR 4u
+#define DMUI_RESULT_DUPLICATE_CLIENT_ID 6u
+#define DMUI_RESULT_DUPLICATE_PAGE_ID 7u
+#define DMUI_RESULT_REGISTRATION_CLOSED 8u
+#define DMUI_RESULT_HOST_DISABLED 9u
+#define DMUI_RESULT_HOST_NOT_INITIALIZED 10u
+#define DMUI_RESULT_HOST_NOT_READY 11u
+#define DMUI_RESULT_BACKEND_FAILED 12u
+#define DMUI_RESULT_RESOURCE_EXHAUSTED 13u
+#define DMUI_RESULT_CLIENT_NOT_FOUND 14u
+#define DMUI_RESULT_PAGE_NOT_FOUND 15u
+#define DMUI_RESULT_INVALID_PAGE_KIND 16u
+#define DMUI_RESULT_NO_FRAME_DEMAND 17u
+#define DMUI_RESULT_CALLBACK_FAILED 18u
+#define DMUI_RESULT_CLIENT_CAPABILITY_REQUIRED 19u
+#define DMUI_RESULT_SWAPCHAIN_REJECTED 20u
+#define DMUI_RESULT_RENDERER_BUSY 21u
+#define DMUI_RESULT_DUPLICATE_ACTION_ID 22u
+#define DMUI_RESULT_ACTION_NOT_FOUND 23u
+#define DMUI_RESULT_MALFORMED_ACTION_ID 24u
+#define DMUI_RESULT_UNKNOWN_CHORD 25u
+#define DMUI_RESULT_WRONG_THREAD 26u
+#define DMUI_RESULT_UNBALANCED_BRACKET 27u
+#define DMUI_RESULT_SERVICE_UNAVAILABLE 28u
+#define DMUI_RESULT_UNSUPPORTED_RESOURCE 30u
+#define DMUI_RESULT_STALE_HANDLE 31u
+#define DMUI_RESULT_BUSY 32u
+#define DMUI_RESULT_BUFFER_TOO_SMALL 33u
+#define DMUI_RESULT_NOT_VISIBLE 34u
+#define DMUI_RESULT_STALE_SUBMISSION 35u
+#define DMUI_RESULT_DUPLICATE_CATEGORY_ID 37u
+#define DMUI_RESULT_CATEGORY_NOT_FOUND 38u
+#define DMUI_RESULT_EXTERNAL_OPEN_FAILED 39u
+#define DMUI_RESULT_EXTERNAL_RESOLUTION_FAILED 40u
+#define DMUI_RESULT_EXTERNAL_RESOLUTION_UNSUPPORTED 41u
+
+static inline const char* DMUI_ResultToString(DMUI_Result result) DMUI_NOEXCEPT
+{
+	switch (result)
+	{
+	case DMUI_RESULT_OK:
+		return "OK";
+	case DMUI_RESULT_UNSUPPORTED_ABI:
+		return "UNSUPPORTED_ABI";
+	case DMUI_RESULT_INVALID_ARGUMENT:
+		return "INVALID_ARGUMENT";
+	case DMUI_RESULT_STRUCT_TOO_SMALL:
+		return "STRUCT_TOO_SMALL";
+	case DMUI_RESULT_INVALID_DESCRIPTOR:
+		return "INVALID_DESCRIPTOR";
+	case DMUI_RESULT_DUPLICATE_CLIENT_ID:
+		return "DUPLICATE_CLIENT_ID";
+	case DMUI_RESULT_DUPLICATE_PAGE_ID:
+		return "DUPLICATE_PAGE_ID";
+	case DMUI_RESULT_REGISTRATION_CLOSED:
+		return "REGISTRATION_CLOSED";
+	case DMUI_RESULT_HOST_DISABLED:
+		return "HOST_DISABLED";
+	case DMUI_RESULT_HOST_NOT_INITIALIZED:
+		return "HOST_NOT_INITIALIZED";
+	case DMUI_RESULT_HOST_NOT_READY:
+		return "HOST_NOT_READY";
+	case DMUI_RESULT_BACKEND_FAILED:
+		return "BACKEND_FAILED";
+	case DMUI_RESULT_RESOURCE_EXHAUSTED:
+		return "RESOURCE_EXHAUSTED";
+	case DMUI_RESULT_CLIENT_NOT_FOUND:
+		return "CLIENT_NOT_FOUND";
+	case DMUI_RESULT_PAGE_NOT_FOUND:
+		return "PAGE_NOT_FOUND";
+	case DMUI_RESULT_INVALID_PAGE_KIND:
+		return "INVALID_PAGE_KIND";
+	case DMUI_RESULT_NO_FRAME_DEMAND:
+		return "NO_FRAME_DEMAND";
+	case DMUI_RESULT_CALLBACK_FAILED:
+		return "CALLBACK_FAILED";
+	case DMUI_RESULT_CLIENT_CAPABILITY_REQUIRED:
+		return "CLIENT_CAPABILITY_REQUIRED";
+	case DMUI_RESULT_SWAPCHAIN_REJECTED:
+		return "SWAPCHAIN_REJECTED";
+	case DMUI_RESULT_RENDERER_BUSY:
+		return "RENDERER_BUSY";
+	case DMUI_RESULT_DUPLICATE_ACTION_ID:
+		return "DUPLICATE_ACTION_ID";
+	case DMUI_RESULT_ACTION_NOT_FOUND:
+		return "ACTION_NOT_FOUND";
+	case DMUI_RESULT_MALFORMED_ACTION_ID:
+		return "MALFORMED_ACTION_ID";
+	case DMUI_RESULT_UNKNOWN_CHORD:
+		return "UNKNOWN_CHORD";
+	case DMUI_RESULT_WRONG_THREAD:
+		return "WRONG_THREAD";
+	case DMUI_RESULT_UNBALANCED_BRACKET:
+		return "UNBALANCED_BRACKET";
+	case DMUI_RESULT_SERVICE_UNAVAILABLE:
+		return "SERVICE_UNAVAILABLE";
+	case DMUI_RESULT_UNSUPPORTED_RESOURCE:
+		return "UNSUPPORTED_RESOURCE";
+	case DMUI_RESULT_STALE_HANDLE:
+		return "STALE_HANDLE";
+	case DMUI_RESULT_BUSY:
+		return "BUSY";
+	case DMUI_RESULT_BUFFER_TOO_SMALL:
+		return "BUFFER_TOO_SMALL";
+	case DMUI_RESULT_NOT_VISIBLE:
+		return "NOT_VISIBLE";
+	case DMUI_RESULT_STALE_SUBMISSION:
+		return "STALE_SUBMISSION";
+	case DMUI_RESULT_DUPLICATE_CATEGORY_ID:
+		return "DUPLICATE_CATEGORY_ID";
+	case DMUI_RESULT_CATEGORY_NOT_FOUND:
+		return "CATEGORY_NOT_FOUND";
+	case DMUI_RESULT_EXTERNAL_OPEN_FAILED:
+		return "EXTERNAL_OPEN_FAILED";
+	case DMUI_RESULT_EXTERNAL_RESOLUTION_FAILED:
+		return "EXTERNAL_RESOLUTION_FAILED";
+	case DMUI_RESULT_EXTERNAL_RESOLUTION_UNSUPPORTED:
+		return "EXTERNAL_RESOLUTION_UNSUPPORTED";
+	default:
+		return "UNKNOWN";
+	}
+}
+
+typedef uint32_t DMUI_HostState;
+
+#define DMUI_HOST_STATE_NOT_INITIALIZED 0u
+#define DMUI_HOST_STATE_WAITING_FOR_PRESENT 1u
+#define DMUI_HOST_STATE_INITIALIZING 2u
+#define DMUI_HOST_STATE_READY 3u
+#define DMUI_HOST_STATE_UNAVAILABLE 4u
+
+typedef uint32_t DMUI_UnavailableReason;
+
+#define DMUI_UNAVAILABLE_NONE 0u
+#define DMUI_UNAVAILABLE_HOST_DISABLED 1u
+#define DMUI_UNAVAILABLE_BACKEND_FAILED 2u
+
+typedef uint32_t DMUI_PageKind;
+
+#define DMUI_PAGE_KIND_SETTINGS 1u
+#define DMUI_PAGE_KIND_OVERLAY 2u
+
+typedef uint32_t DMUI_StatusSeverity;
+
+#define DMUI_STATUS_SEVERITY_INFO 0u
+#define DMUI_STATUS_SEVERITY_SUCCESS 1u
+#define DMUI_STATUS_SEVERITY_WARNING 2u
+#define DMUI_STATUS_SEVERITY_ERROR 3u
+
+typedef uint32_t DMUI_FontRole;
+
+#define DMUI_FONT_ROLE_BODY 0u
+#define DMUI_FONT_ROLE_TITLE 1u
+#define DMUI_FONT_ROLE_HEADING 2u
+#define DMUI_FONT_ROLE_SUBHEADING 3u
+#define DMUI_FONT_ROLE_SUBTEXT 4u
+#define DMUI_FONT_ROLE_COUNT 5u
+
+typedef uint32_t DMUI_SettingsAction;
+
+#define DMUI_SETTINGS_ACTION_RESET 0u
+#define DMUI_SETTINGS_ACTION_REVERT 1u
+#define DMUI_SETTINGS_ACTION_APPLY 2u
+
+typedef uint32_t DMUI_HotkeyBindingState;
+
+#define DMUI_HOTKEY_BINDING_BOUND 0u
+#define DMUI_HOTKEY_BINDING_UNBOUND_USER 1u
+#define DMUI_HOTKEY_BINDING_UNBOUND_DEFAULT_CONFLICT 2u
+#define DMUI_HOTKEY_BINDING_UNBOUND_NEVER_SET 3u
+#define DMUI_HOTKEY_BINDING_UNBOUND_OVERRIDE_CONFLICT 4u
+#define DMUI_HOTKEY_BINDING_UNBOUND_INVALID_OVERRIDE 5u
+
+typedef uint32_t DMUI_ClientCapabilities;
+
+#define DMUI_CLIENT_CAPABILITY_NONE 0u
+#define DMUI_CLIENT_CAPABILITY_RENDERER_REPLACEMENT 0x00000001u
+
+typedef uint64_t DMUI_HostServices;
+
+#define DMUI_HOST_SERVICE_NONE UINT64_C(0)
+#define DMUI_HOST_SERVICE_FRAME_CONTROL (UINT64_C(1) << 0u)
+#define DMUI_HOST_SERVICE_EDIT_LIFECYCLE (UINT64_C(1) << 1u)
+#define DMUI_HOST_SERVICE_CONTEXTUAL_HOTKEYS (UINT64_C(1) << 2u)
+#define DMUI_HOST_SERVICE_IMAGE_RESOURCES (UINT64_C(1) << 3u)
+#define DMUI_HOST_SERVICE_MANAGED_OVERLAYS (UINT64_C(1) << 4u)
+#define DMUI_HOST_SERVICE_NOTIFICATIONS (UINT64_C(1) << 5u)
+#define DMUI_HOST_SERVICE_ANNOTATED_PLOTS (UINT64_C(1) << 6u)
+#define DMUI_HOST_SERVICE_DIALOGS (UINT64_C(1) << 7u)
+#define DMUI_HOST_SERVICE_PIXEL_IMAGES (UINT64_C(1) << 8u)
+#define DMUI_HOST_SERVICE_EXTERNAL_OPEN (UINT64_C(1) << 9u)
+#define DMUI_HOST_SERVICE_VIRTUAL_FILE_TARGETS (UINT64_C(1) << 10u)
+#define DMUI_HOST_SERVICE_NAVIGATION_ICONS (UINT64_C(1) << 11u)
+
+typedef uint32_t DMUI_ClientOrigin;
+
+#define DMUI_CLIENT_ORIGIN_NATIVE 0u
+#define DMUI_CLIENT_ORIGIN_BRIDGED 1u
+
+typedef uint64_t DMUI_ClientHandle;
+typedef uint64_t DMUI_PageHandle;
+typedef uint64_t DMUI_ActionHandle;
+typedef uint64_t DMUI_FrameObserverHandle;
+typedef uint64_t DMUI_HotkeyActionHandle;
+typedef uint64_t DMUI_PageActivityObserverHandle;
+typedef uint64_t DMUI_ImageHandle;
+typedef uint64_t DMUI_DialogHandle;
+
+#define DMUI_INVALID_CLIENT_HANDLE ((DMUI_ClientHandle)0u)
+#define DMUI_INVALID_PAGE_HANDLE ((DMUI_PageHandle)0u)
+#define DMUI_INVALID_ACTION_HANDLE ((DMUI_ActionHandle)0u)
+#define DMUI_INVALID_FRAME_OBSERVER_HANDLE ((DMUI_FrameObserverHandle)0u)
+#define DMUI_INVALID_HOTKEY_ACTION_HANDLE ((DMUI_HotkeyActionHandle)0u)
+#define DMUI_INVALID_PAGE_ACTIVITY_OBSERVER_HANDLE ((DMUI_PageActivityObserverHandle)0u)
+#define DMUI_INVALID_IMAGE_HANDLE ((DMUI_ImageHandle)0u)
+#define DMUI_INVALID_DIALOG_HANDLE ((DMUI_DialogHandle)0u)
+
+typedef uint32_t DMUI_PageActivityKind;
+
+#define DMUI_PAGE_ACTIVITY_ACTIVATED 1u
+#define DMUI_PAGE_ACTIVITY_CHANGED 2u
+#define DMUI_PAGE_ACTIVITY_DEACTIVATED 3u
+
+typedef uint32_t DMUI_SettingsRowLayout;
+
+#define DMUI_SETTINGS_ROW_LAYOUT_LABEL_VALUE 0u
+#define DMUI_SETTINGS_ROW_LAYOUT_FULL_SPAN 1u
+
+typedef uint32_t DMUI_HotkeyContextPolicy;
+
+#define DMUI_HOTKEY_CONTEXT_ALWAYS 0u
+#define DMUI_HOTKEY_CONTEXT_HOST_INPUT_INACTIVE 1u
+#define DMUI_HOTKEY_CONTEXT_GAMEPLAY_UNOBSTRUCTED 2u
+
+typedef uint32_t DMUI_ImageStatus;
+
+#define DMUI_IMAGE_STATUS_READY 0u
+#define DMUI_IMAGE_STATUS_INVALIDATED 1u
+#define DMUI_IMAGE_STATUS_RELEASED 2u
+
+typedef uint32_t DMUI_PixelFormat;
+
+// Bytes are ordered R, G, B, A. Alpha is straight, not premultiplied.
+#define DMUI_PIXEL_FORMAT_RGBA8_UNORM 1u
+
+typedef uint32_t DMUI_OverlayAnchor;
+
+#define DMUI_OVERLAY_ANCHOR_TOP_LEFT 0u
+#define DMUI_OVERLAY_ANCHOR_TOP_RIGHT 1u
+#define DMUI_OVERLAY_ANCHOR_BOTTOM_LEFT 2u
+#define DMUI_OVERLAY_ANCHOR_BOTTOM_RIGHT 3u
+#define DMUI_OVERLAY_ANCHOR_FREE 4u
+
+typedef uint32_t DMUI_DialogKind;
+
+#define DMUI_DIALOG_KIND_CONFIRM 0u
+#define DMUI_DIALOG_KIND_TEXT_ENTRY 1u
+
+typedef uint32_t DMUI_DialogEventKind;
+
+#define DMUI_DIALOG_EVENT_PENDING 0u
+#define DMUI_DIALOG_EVENT_SUBMITTED 1u
+#define DMUI_DIALOG_EVENT_CANCELLED 2u
+#define DMUI_DIALOG_EVENT_COMPLETED 3u
+
+typedef uint32_t DMUI_ExternalTargetKind;
+
+#define DMUI_EXTERNAL_TARGET_NONE 0u
+#define DMUI_EXTERNAL_TARGET_URI 1u
+#define DMUI_EXTERNAL_TARGET_FILE 2u
+#define DMUI_EXTERNAL_TARGET_DIRECTORY 3u
+#define DMUI_EXTERNAL_TARGET_VIRTUAL_FILE 4u
+#define DMUI_EXTERNAL_TARGET_VIRTUAL_FILE_PARENT 5u
+
+typedef uint32_t DMUI_LinkAction;
+
+#define DMUI_LINK_ACTION_COPY_TARGET 0u
+#define DMUI_LINK_ACTION_OPEN_EXTERNAL 1u
+
+#if defined(_MSC_VER)
+#pragma pack(push, 8)
+#endif
+
+typedef struct DMUI_HostReadyInfo
+{
+	uint32_t structSize;
+	// Informational API release label, not an ABI compatibility gate.
+	uint32_t apiVersion;
+} DMUI_HostReadyInfo;
+
+typedef void (DMUI_CALL *DMUI_HostReadyCallback)(
+	const DMUI_HostReadyInfo* info,
+	void* userData);
+typedef void (DMUI_CALL *DMUI_HostUnavailableCallback)(
+	DMUI_UnavailableReason reason,
+	void* userData);
+typedef DMUI_Result (DMUI_CALL *DMUI_PageDrawCallback)(void* userData);
+typedef void (DMUI_CALL *DMUI_ActionCallback)(void* userData);
+typedef struct DMUI_PageActivityInfo DMUI_PageActivityInfo;
+typedef void (DMUI_CALL *DMUI_PageActivityCallback)(
+	const DMUI_PageActivityInfo* info,
+	void* userData);
+// Frame callbacks run on the render thread and cannot be unregistered.
+typedef void (DMUI_CALL *DMUI_FrameCallback)(void* userData);
+// Hotkey callbacks run on the render thread, beside frame observers.
+// Handlers must return promptly: blocking I/O or long work costs frame time directly.
+// Edges dispatch FIFO, are never collapsed, and persist across stalled frames.
+// Auto-repeat is coalesced, so each physical press delivers exactly one press edge.
+// On overflow the bounded queue drops and logs only whole press/release pairs.
+// Unregistering cancels queued edges, so the pair guarantee ends when the action is removed.
+// A callback may unregister its own action; keep userData valid until that callback returns.
+// Otherwise clients own userData and must keep it valid until unregister returns.
+typedef void (DMUI_CALL *DMUI_HotkeyCallback)(
+	DMUI_HotkeyActionHandle action,
+	uint32_t pressed,
+	void* userData);
+
+typedef struct DMUI_ClientDescriptor
+{
+	uint32_t structSize;
+	// Informational client SDK release label. The DMUI_GetAPI host ABI and
+	// queryUIAPI UI ABI negotiations govern compatibility.
+	uint32_t apiVersion;
+	const char* id;
+	const char* displayName;
+	uint32_t version;
+	DMUI_HostReadyCallback onHostReady;
+	DMUI_HostUnavailableCallback onHostUnavailable;
+	void* userData;
+	DMUI_ClientCapabilities capabilities;
+	const char* iconName;
+	DMUI_ClientOrigin origin;
+	const char* bridgeSourceLabel;
+	// Optional appended preflight requirements. A host must reject registration
+	// before assigning a handle when either requirement cannot be met.
+	DMUI_HostServices requiredServices;
+} DMUI_ClientDescriptor;
+
+#define DMUI_CLIENT_DESCRIPTOR_0_1_SIZE \
+	((uint32_t)(offsetof(DMUI_ClientDescriptor, bridgeSourceLabel) + sizeof(const char*)))
+#define DMUI_CLIENT_DESCRIPTOR_SERVICES_SIZE \
+	((uint32_t)(offsetof(DMUI_ClientDescriptor, requiredServices) + sizeof(DMUI_HostServices)))
+
+typedef struct DMUI_PageDescriptor
+{
+	uint32_t structSize;
+	const char* id;
+	const char* displayName;
+	// Null or empty leaves the page uncategorized. Non-empty IDs must have
+	// already been registered for this client.
+	const char* categoryId;
+	const char* summary;
+	int32_t sortKey;
+	DMUI_PageKind kind;
+	DMUI_PageDrawCallback draw;
+	void* userData;
+	// Optional appended palette icon name. Unknown names use semantic fallback.
+	const char* iconName;
+} DMUI_PageDescriptor;
+
+#define DMUI_PAGE_DESCRIPTOR_0_1_SIZE \
+	((uint32_t)(offsetof(DMUI_PageDescriptor, userData) + sizeof(void*)))
+#define DMUI_PAGE_DESCRIPTOR_ICON_SIZE \
+	((uint32_t)(offsetof(DMUI_PageDescriptor, iconName) + sizeof(const char*)))
+
+typedef struct DMUI_CategoryDescriptor
+{
+	uint32_t structSize;
+	const char* id;
+	const char* displayName;
+	int32_t sortKey;
+	uint32_t reserved;
+	// Optional appended category-heading icon name. Unknown names use semantic fallback.
+	const char* iconName;
+} DMUI_CategoryDescriptor;
+
+#define DMUI_CATEGORY_DESCRIPTOR_0_1_SIZE \
+	((uint32_t)(offsetof(DMUI_CategoryDescriptor, reserved) + sizeof(uint32_t)))
+#define DMUI_CATEGORY_DESCRIPTOR_ICON_SIZE \
+	((uint32_t)(offsetof(DMUI_CategoryDescriptor, iconName) + sizeof(const char*)))
+
+typedef struct DMUI_ActionDescriptor
+{
+	uint32_t structSize;
+	const char* id;
+	const char* displayLabel;
+	const char* iconName;
+	const char* tooltip;
+	int32_t sortKey;
+	DMUI_ActionCallback callback;
+	void* userData;
+} DMUI_ActionDescriptor;
+
+#define DMUI_ACTION_DESCRIPTOR_0_1_SIZE \
+	((uint32_t)(offsetof(DMUI_ActionDescriptor, userData) + sizeof(void*)))
+
+typedef struct DMUI_FrameObserverDescriptor
+{
+	uint32_t structSize;
+	DMUI_FrameCallback callback;
+	void* userData;
+} DMUI_FrameObserverDescriptor;
+
+#define DMUI_FRAME_OBSERVER_DESCRIPTOR_0_1_SIZE \
+	((uint32_t)(offsetof(DMUI_FrameObserverDescriptor, userData) + sizeof(void*)))
+
+typedef struct DMUI_HotkeyActionDescriptor
+{
+	uint32_t structSize;
+	const char* id;
+	const char* displayName;
+	const char* suggestedDefaultChord;
+	DMUI_HotkeyCallback callback;
+	void* userData;
+	// Appended policy. Old descriptors default to ALWAYS.
+	DMUI_HotkeyContextPolicy contextPolicy;
+	uint32_t reserved;
+} DMUI_HotkeyActionDescriptor;
+
+#define DMUI_HOTKEY_ACTION_DESCRIPTOR_0_1_SIZE \
+	((uint32_t)(offsetof(DMUI_HotkeyActionDescriptor, userData) + sizeof(void*)))
+#define DMUI_HOTKEY_ACTION_DESCRIPTOR_CONTEXT_SIZE \
+	((uint32_t)(offsetof(DMUI_HotkeyActionDescriptor, reserved) + sizeof(uint32_t)))
+
+typedef struct DMUI_ExternalOpenDescriptor
+{
+	uint32_t structSize;
+	DMUI_ExternalTargetKind targetKind;
+	const char* target;
+	const char* application;
+	const char* const* arguments;
+	uint32_t argumentCount;
+	uint32_t reserved;
+	const char* workingDirectory;
+} DMUI_ExternalOpenDescriptor;
+
+#define DMUI_EXTERNAL_OPEN_DESCRIPTOR_0_1_SIZE \
+	((uint32_t)(offsetof(DMUI_ExternalOpenDescriptor, workingDirectory) + sizeof(const char*)))
+
+typedef struct DMUI_LinkDescriptor
+{
+	uint32_t structSize;
+	const char* label;
+	const char* note;
+	uint32_t glyph;
+	uint32_t enabled;
+	DMUI_LinkAction action;
+	uint32_t reserved;
+	const DMUI_ExternalOpenDescriptor* external;
+} DMUI_LinkDescriptor;
+
+#define DMUI_LINK_DESCRIPTOR_0_1_SIZE \
+	((uint32_t)(offsetof(DMUI_LinkDescriptor, external) + sizeof(const DMUI_ExternalOpenDescriptor*)))
+
+typedef struct DMUI_FaqEntry
+{
+	uint32_t structSize;
+	const char* question;
+	const char* answer;
+} DMUI_FaqEntry;
+
+#define DMUI_FAQ_ENTRY_0_1_SIZE \
+	((uint32_t)(offsetof(DMUI_FaqEntry, answer) + sizeof(const char*)))
+
+typedef struct DMUI_DiagnosticDescriptor
+{
+	uint32_t structSize;
+	DMUI_StatusSeverity severity;
+	const char* scope;
+	const char* summary;
+	const char* detail;
+} DMUI_DiagnosticDescriptor;
+
+#define DMUI_DIAGNOSTIC_DESCRIPTOR_0_1_SIZE \
+	((uint32_t)(offsetof(DMUI_DiagnosticDescriptor, detail) + sizeof(const char*)))
+
+typedef struct DMUI_PageActivityInfo
+{
+	uint32_t structSize;
+	DMUI_PageActivityKind kind;
+	DMUI_PageHandle previousPage;
+	DMUI_PageHandle activePage;
+} DMUI_PageActivityInfo;
+
+#define DMUI_PAGE_ACTIVITY_INFO_0_1_SIZE \
+	((uint32_t)(offsetof(DMUI_PageActivityInfo, activePage) + sizeof(DMUI_PageHandle)))
+
+typedef struct DMUI_PageActivityObserverDescriptor
+{
+	uint32_t structSize;
+	DMUI_PageActivityCallback callback;
+	void* userData;
+} DMUI_PageActivityObserverDescriptor;
+
+#define DMUI_PAGE_ACTIVITY_OBSERVER_DESCRIPTOR_0_1_SIZE \
+	((uint32_t)(offsetof(DMUI_PageActivityObserverDescriptor, userData) + sizeof(void*)))
+
+typedef struct DMUI_HotkeyBindingInfo
+{
+	uint32_t structSize;
+	DMUI_HotkeyBindingState state;
+	char chord[32];
+} DMUI_HotkeyBindingInfo;
+
+typedef struct DMUI_HostStateInfo
+{
+	uint32_t structSize;
+	DMUI_HostState state;
+	DMUI_UnavailableReason unavailableReason;
+	uint32_t registrationOpen;
+	uint32_t clientCount;
+	uint32_t pageCount;
+	uint32_t demandedOverlayCount;
+} DMUI_HostStateInfo;
+
+typedef struct DMUI_Vec2
+{
+	float x;
+	float y;
+} DMUI_Vec2;
+
+typedef struct DMUI_Vec4
+{
+	float x;
+	float y;
+	float z;
+	float w;
+} DMUI_Vec4;
+
+typedef struct DMUI_StyleMetrics
+{
+	uint32_t structSize;
+	DMUI_Vec2 itemSpacing;
+	DMUI_Vec2 framePadding;
+	DMUI_Vec2 itemInnerSpacing;
+	DMUI_Vec2 cellPadding;
+	DMUI_Vec2 windowPadding;
+	float indentSpacing;
+	float scrollbarSize;
+	float fontSizeBase;
+} DMUI_StyleMetrics;
+
+#define DMUI_STYLE_METRICS_0_1_SIZE \
+	((uint32_t)(offsetof(DMUI_StyleMetrics, scrollbarSize) + sizeof(float)))
+#define DMUI_STYLE_METRICS_FONT_SIZE_BASE_SIZE \
+	((uint32_t)(offsetof(DMUI_StyleMetrics, fontSizeBase) + sizeof(float)))
+
+typedef struct DMUI_SettingsRowOptions
+{
+	uint32_t structSize;
+	uint32_t resetVisible;
+	uint32_t resetEnabled;
+} DMUI_SettingsRowOptions;
+
+#define DMUI_SETTINGS_ROW_OPTIONS_0_1_SIZE \
+	((uint32_t)(offsetof(DMUI_SettingsRowOptions, resetEnabled) + sizeof(uint32_t)))
+
+typedef struct DMUI_SettingsRowBeginOptions
+{
+	uint32_t structSize;
+	DMUI_SettingsRowLayout layout;
+} DMUI_SettingsRowBeginOptions;
+
+#define DMUI_SETTINGS_ROW_BEGIN_OPTIONS_0_1_SIZE \
+	((uint32_t)(offsetof(DMUI_SettingsRowBeginOptions, layout) + sizeof(DMUI_SettingsRowLayout)))
+
+typedef struct DMUI_ThemeColors
+{
+	uint32_t structSize;
+	DMUI_Vec4 success;
+	DMUI_Vec4 warning;
+	DMUI_Vec4 error;
+	DMUI_Vec4 info;
+	DMUI_Vec4 muted;
+	DMUI_Vec4 accent;
+	DMUI_Vec4 accentMuted;
+	DMUI_Vec4 statusDisable;
+	DMUI_Vec4 statusError;
+	DMUI_Vec4 statusWarning;
+	DMUI_Vec4 statusRestartNeeded;
+	DMUI_Vec4 statusCurrentHotkey;
+	DMUI_Vec4 statusSuccess;
+	DMUI_Vec4 statusInfo;
+} DMUI_ThemeColors;
+
+#define DMUI_THEME_COLORS_0_1_SIZE \
+	((uint32_t)(offsetof(DMUI_ThemeColors, statusInfo) + sizeof(DMUI_Vec4)))
+
+typedef struct DMUI_HostServicesInfo
+{
+	uint32_t structSize;
+	DMUI_HostServices supportedServices;
+} DMUI_HostServicesInfo;
+
+#define DMUI_HOST_SERVICES_INFO_0_1_SIZE \
+	((uint32_t)(offsetof(DMUI_HostServicesInfo, supportedServices) + sizeof(DMUI_HostServices)))
+
+// The source pointer must be a live ID3D11ShaderResourceView for the duration
+// of this call. The host retains its own COM reference on success.
+typedef struct DMUI_D3D11ImageDescriptor
+{
+	uint32_t structSize;
+	void* shaderResourceView;
+	uint32_t contentWidth;
+	uint32_t contentHeight;
+} DMUI_D3D11ImageDescriptor;
+
+#define DMUI_D3D11_IMAGE_DESCRIPTOR_0_1_SIZE \
+	((uint32_t)(offsetof(DMUI_D3D11ImageDescriptor, contentHeight) + sizeof(uint32_t)))
+
+// The host synchronously consumes every referenced pixel byte before returning.
+// It performs no alpha premultiplication or color-space conversion. rowPitch must
+// cover width * 4 bytes. accessibleByteCount must cover
+// (height - 1) * rowPitch + width * 4; final-row padding need not be accessible.
+typedef struct DMUI_ImageDescriptor
+{
+	uint32_t structSize;
+	uint32_t width;
+	uint32_t height;
+	DMUI_PixelFormat pixelFormat;
+	uint32_t reserved;
+	uint64_t rowPitch;
+	uint64_t accessibleByteCount;
+	const void* pixels;
+} DMUI_ImageDescriptor;
+
+#define DMUI_IMAGE_DESCRIPTOR_0_1_SIZE \
+	((uint32_t)(offsetof(DMUI_ImageDescriptor, pixels) + sizeof(const void*)))
+
+typedef struct DMUI_ImageDrawOptions
+{
+	uint32_t structSize;
+	DMUI_Vec2 size;
+	DMUI_Vec2 uv0;
+	DMUI_Vec2 uv1;
+	DMUI_Vec4 tint;
+	uint32_t preserveAspect;
+	uint32_t reserved;
+} DMUI_ImageDrawOptions;
+
+#define DMUI_IMAGE_DRAW_OPTIONS_0_1_SIZE \
+	((uint32_t)(offsetof(DMUI_ImageDrawOptions, reserved) + sizeof(uint32_t)))
+
+typedef struct DMUI_ImageInfo
+{
+	uint32_t structSize;
+	DMUI_ImageStatus status;
+	uint32_t contentWidth;
+	uint32_t contentHeight;
+	uint64_t deviceGeneration;
+} DMUI_ImageInfo;
+
+#define DMUI_IMAGE_INFO_0_1_SIZE \
+	((uint32_t)(offsetof(DMUI_ImageInfo, deviceGeneration) + sizeof(uint64_t)))
+
+typedef struct DMUI_ManagedOverlayOptions
+{
+	uint32_t structSize;
+	DMUI_OverlayAnchor anchor;
+	DMUI_Vec2 offset;
+	DMUI_Vec2 minimumSize;
+	DMUI_Vec2 maximumSize;
+	float opacity;
+	float contentScale;
+	uint32_t backgroundVisible;
+	uint32_t borderVisible;
+	uint32_t allowArrangement;
+	uint32_t reserved;
+} DMUI_ManagedOverlayOptions;
+
+#define DMUI_MANAGED_OVERLAY_OPTIONS_0_1_SIZE \
+	((uint32_t)(offsetof(DMUI_ManagedOverlayOptions, reserved) + sizeof(uint32_t)))
+
+typedef struct DMUI_ManagedOverlayPlacement
+{
+	uint32_t structSize;
+	DMUI_OverlayAnchor anchor;
+	DMUI_Vec2 offset;
+	DMUI_Vec2 position;
+	DMUI_Vec2 size;
+	uint64_t changeGeneration;
+	uint32_t arrangementCompleted;
+	uint32_t visible;
+} DMUI_ManagedOverlayPlacement;
+
+#define DMUI_MANAGED_OVERLAY_PLACEMENT_0_1_SIZE \
+	((uint32_t)(offsetof(DMUI_ManagedOverlayPlacement, visible) + sizeof(uint32_t)))
+
+typedef struct DMUI_NotificationDescriptor
+{
+	uint32_t structSize;
+	DMUI_StatusSeverity severity;
+	const char* message;
+	uint32_t durationMilliseconds;
+} DMUI_NotificationDescriptor;
+
+#define DMUI_NOTIFICATION_DESCRIPTOR_0_1_SIZE \
+	((uint32_t)(offsetof(DMUI_NotificationDescriptor, durationMilliseconds) + sizeof(uint32_t)))
+
+typedef struct DMUI_PlotReferenceLine
+{
+	float value;
+	DMUI_Vec4 color;
+} DMUI_PlotReferenceLine;
+
+typedef struct DMUI_AnnotatedPlotDescriptor
+{
+	uint32_t structSize;
+	const float* samples;
+	uint32_t sampleCount;
+	uint32_t sampleOffset;
+	float scaleMinimum;
+	float scaleMaximum;
+	DMUI_Vec2 size;
+	const char* overlayText;
+	const DMUI_PlotReferenceLine* referenceLines;
+	uint32_t referenceLineCount;
+} DMUI_AnnotatedPlotDescriptor;
+
+#define DMUI_ANNOTATED_PLOT_DESCRIPTOR_0_1_SIZE \
+	((uint32_t)(offsetof(DMUI_AnnotatedPlotDescriptor, referenceLineCount) + sizeof(uint32_t)))
+
+typedef struct DMUI_DialogDescriptor
+{
+	uint32_t structSize;
+	DMUI_DialogKind kind;
+	const char* title;
+	const char* body;
+	const char* acceptLabel;
+	const char* cancelLabel;
+	const char* hint;
+	const char* initialText;
+	uint32_t maximumTextBytes;
+} DMUI_DialogDescriptor;
+
+#define DMUI_DIALOG_DESCRIPTOR_0_1_SIZE \
+	((uint32_t)(offsetof(DMUI_DialogDescriptor, maximumTextBytes) + sizeof(uint32_t)))
+
+typedef struct DMUI_DialogEvent
+{
+	uint32_t structSize;
+	DMUI_DialogEventKind kind;
+	uint64_t submissionId;
+	uint32_t requiredTextCapacity;
+} DMUI_DialogEvent;
+
+#define DMUI_DIALOG_EVENT_0_1_SIZE \
+	((uint32_t)(offsetof(DMUI_DialogEvent, requiredTextCapacity) + sizeof(uint32_t)))
+
+typedef struct DMUI_IconResolutionRequest
+{
+	uint32_t structSize;
+	// Null or empty fields are equivalent. explicitName is limited to 128 bytes;
+	// metadata fields are limited to 256 bytes.
+	const char* explicitName;
+	const char* primaryMetadata;
+	const char* secondaryMetadata;
+} DMUI_IconResolutionRequest;
+
+#define DMUI_ICON_RESOLUTION_REQUEST_0_1_SIZE \
+	((uint32_t)(offsetof(DMUI_IconResolutionRequest, secondaryMetadata) + sizeof(const char*)))
+
+typedef DMUI_Result (DMUI_CALL *DMUI_RegisterClientFn)(
+	const DMUI_ClientDescriptor* descriptor,
+	DMUI_ClientHandle* client) DMUI_NOEXCEPT;
+typedef DMUI_Result (DMUI_CALL *DMUI_RegisterCategoryFn)(
+	DMUI_ClientHandle client,
+	const DMUI_CategoryDescriptor* descriptor) DMUI_NOEXCEPT;
+typedef DMUI_Result (DMUI_CALL *DMUI_RegisterPageFn)(
+	DMUI_ClientHandle client,
+	const DMUI_PageDescriptor* descriptor,
+	DMUI_PageHandle* page) DMUI_NOEXCEPT;
+typedef DMUI_Result (DMUI_CALL *DMUI_QueryStateFn)(
+	DMUI_HostStateInfo* state) DMUI_NOEXCEPT;
+typedef DMUI_Result (DMUI_CALL *DMUI_RequestFrameFn)(
+	DMUI_ClientHandle client,
+	DMUI_PageHandle page) DMUI_NOEXCEPT;
+typedef DMUI_Result (DMUI_CALL *DMUI_ReleaseFrameFn)(
+	DMUI_ClientHandle client,
+	DMUI_PageHandle page) DMUI_NOEXCEPT;
+typedef DMUI_Result (DMUI_CALL *DMUI_IsMenuVisibleFn)(
+	uint32_t* visible) DMUI_NOEXCEPT;
+typedef DMUI_Result (DMUI_CALL *DMUI_SelectPageFn)(
+	DMUI_ClientHandle client,
+	DMUI_PageHandle page) DMUI_NOEXCEPT;
+typedef DMUI_Result (DMUI_CALL *DMUI_AttachSwapChainFn)(
+	DMUI_ClientHandle client,
+	void* nativeSwapChain) DMUI_NOEXCEPT;
+typedef DMUI_Result (DMUI_CALL *DMUI_RegisterActionFn)(
+	DMUI_ClientHandle client,
+	const DMUI_ActionDescriptor* descriptor,
+	DMUI_ActionHandle* action) DMUI_NOEXCEPT;
+typedef DMUI_Result (DMUI_CALL *DMUI_SetStatusFn)(
+	DMUI_ClientHandle client,
+	DMUI_StatusSeverity severity,
+	const char* message) DMUI_NOEXCEPT;
+typedef DMUI_Result (DMUI_CALL *DMUI_GetThemeColorsFn)(
+	DMUI_ClientHandle client,
+	DMUI_ThemeColors* colors) DMUI_NOEXCEPT;
+typedef DMUI_Result (DMUI_CALL *DMUI_PushFontFn)(
+	DMUI_ClientHandle client,
+	DMUI_FontRole role) DMUI_NOEXCEPT;
+typedef DMUI_Result (DMUI_CALL *DMUI_PopFontFn)(
+	DMUI_ClientHandle client) DMUI_NOEXCEPT;
+typedef DMUI_Result (DMUI_CALL *DMUI_DrawSectionHeaderFn)(
+	DMUI_ClientHandle client,
+	const char* text,
+	uint32_t glyph) DMUI_NOEXCEPT;
+typedef DMUI_Result (DMUI_CALL *DMUI_DrawBulletTextFn)(
+	DMUI_ClientHandle client,
+	const char* text) DMUI_NOEXCEPT;
+// buffer must be NUL-terminated within capacity bytes, and capacity zero is invalid.
+// On success, buffer stays NUL-terminated and output longer than capacity is truncated to fit.
+// changed is set when the edited text differs from the input, including a truncated edit.
+typedef DMUI_Result (DMUI_CALL *DMUI_DrawSearchInputFn)(
+	DMUI_ClientHandle client,
+	const char* id,
+	const char* hint,
+	char* buffer,
+	size_t capacity,
+	uint32_t* changed) DMUI_NOEXCEPT;
+typedef DMUI_Result (DMUI_CALL *DMUI_DrawCollapsingSectionHeaderFn)(
+	DMUI_ClientHandle client,
+	const char* key,
+	const char* text,
+	uint32_t glyph,
+	uint32_t* expanded,
+	size_t count) DMUI_NOEXCEPT;
+// Link rows are render-thread-only and valid only inside page draw callbacks.
+// Buttons share the available width. COPY_TARGET copies external.target;
+// OPEN_EXTERNAL dispatches the same descriptor through openExternal.
+// Tooltips use a non-empty note when present, otherwise the target.
+// A zero count succeeds without drawing.
+// Null required values, empty labels or enabled URLs, and short descriptors are invalid.
+typedef DMUI_Result (DMUI_CALL *DMUI_DrawLinkRowFn)(
+	DMUI_ClientHandle client,
+	const char* id,
+	const DMUI_LinkDescriptor* links,
+	size_t count) DMUI_NOEXCEPT;
+// FAQ rows are render-thread-only and valid only inside page draw callbacks.
+// The host owns presentation and expansion state, keyed by the row ID and question.
+// A zero count succeeds without drawing; null, empty, and short entries are invalid.
+typedef DMUI_Result (DMUI_CALL *DMUI_DrawFaqFn)(
+	DMUI_ClientHandle client,
+	const char* id,
+	const DMUI_FaqEntry* entries,
+	size_t count) DMUI_NOEXCEPT;
+// Diagnostics may be reported from any thread, including during client loading.
+// The host copies descriptor strings before returning and aggregates matching reports.
+// Scope and detail are optional; null descriptors, empty summaries, unknown severities,
+// and short descriptors are invalid.
+typedef DMUI_Result (DMUI_CALL *DMUI_ReportDiagnosticFn)(
+	DMUI_ClientHandle client,
+	const DMUI_DiagnosticDescriptor* diagnostic) DMUI_NOEXCEPT;
+typedef DMUI_Result (DMUI_CALL *DMUI_DrawSettingsActionButtonFn)(
+	DMUI_ClientHandle client,
+	const char* id,
+	DMUI_Vec2 origin,
+	DMUI_Vec2 size,
+	DMUI_SettingsAction action,
+	const char* fallbackLabel,
+	const char* tooltip,
+	uint32_t enabled,
+	uint32_t* pressed) DMUI_NOEXCEPT;
+typedef DMUI_Result (DMUI_CALL *DMUI_SettingsActionButtonWidthFn)(
+	DMUI_ClientHandle client,
+	DMUI_SettingsAction action,
+	const char* fallbackLabel,
+	float buttonExtent,
+	float* width) DMUI_NOEXCEPT;
+typedef DMUI_Result (DMUI_CALL *DMUI_SettingsActionButtonExtentFn)(
+	DMUI_ClientHandle client,
+	float* extent) DMUI_NOEXCEPT;
+typedef DMUI_Result (DMUI_CALL *DMUI_RegisterFrameObserverFn)(
+	DMUI_ClientHandle client,
+	const DMUI_FrameObserverDescriptor* descriptor,
+	DMUI_FrameObserverHandle* observer) DMUI_NOEXCEPT;
+typedef DMUI_Result (DMUI_CALL *DMUI_QueryVideoMemoryFn)(
+	DMUI_ClientHandle client,
+	uint64_t* used,
+	uint64_t* budget) DMUI_NOEXCEPT;
+typedef DMUI_Result (DMUI_CALL *DMUI_RegisterHotkeyActionFn)(
+	DMUI_ClientHandle client,
+	const DMUI_HotkeyActionDescriptor* descriptor,
+	DMUI_HotkeyActionHandle* action) DMUI_NOEXCEPT;
+typedef DMUI_Result (DMUI_CALL *DMUI_QueryHotkeyBindingFn)(
+	DMUI_ClientHandle client,
+	DMUI_HotkeyActionHandle action,
+	DMUI_HotkeyBindingInfo* binding) DMUI_NOEXCEPT;
+// Registration accepts any thread; unregister must run on the render thread, or returns
+// DMUI_RESULT_WRONG_THREAD. The asymmetry exists for userData lifetime, not container safety:
+// dispatch also runs on the render thread, so no callback can be in flight when unregister returns.
+// No later callback for the action runs after unregister returns successfully.
+// The saved override remains orphaned and is reapplied if the action is registered again.
+// A key held across unregister releases against the old handle, so a re-registered action
+// never receives a release edge for a press it did not observe.
+typedef DMUI_Result (DMUI_CALL *DMUI_UnregisterHotkeyActionFn)(
+	DMUI_ClientHandle client,
+	DMUI_HotkeyActionHandle action) DMUI_NOEXCEPT;
+// Settings-table brackets are render-thread-only, non-nestable, and valid only in page callbacks.
+// A successful begin with visible == 0 opens no bracket and requires no matching end.
+// A successful begin with visible != 0 must be matched by its corresponding end.
+typedef DMUI_Result (DMUI_CALL *DMUI_BeginSettingsTableFn)(
+	DMUI_ClientHandle client,
+	const char* id,
+	uint32_t* visible) DMUI_NOEXCEPT;
+typedef DMUI_Result (DMUI_CALL *DMUI_BeginSettingsRowFn)(
+	DMUI_ClientHandle client,
+	const char* id,
+	const char* label,
+	const char* description,
+	uint32_t* visible) DMUI_NOEXCEPT;
+typedef DMUI_Result (DMUI_CALL *DMUI_EndSettingsRowFn)(
+	DMUI_ClientHandle client,
+	const DMUI_SettingsRowOptions* options,
+	uint32_t* resetPressed) DMUI_NOEXCEPT;
+typedef DMUI_Result (DMUI_CALL *DMUI_EndSettingsTableFn)(
+	DMUI_ClientHandle client) DMUI_NOEXCEPT;
+typedef DMUI_Result (DMUI_CALL *DMUI_BeginSettingsRowExFn)(
+	DMUI_ClientHandle client,
+	const char* id,
+	const char* label,
+	const char* description,
+	const DMUI_SettingsRowBeginOptions* options,
+	uint32_t* visible) DMUI_NOEXCEPT;
+// Page activity observers are process-lifetime registrations invoked during shell drawing on the render thread.
+typedef DMUI_Result (DMUI_CALL *DMUI_RegisterPageActivityObserverFn)(
+	DMUI_ClientHandle client,
+	const DMUI_PageActivityObserverDescriptor* descriptor,
+	DMUI_PageActivityObserverHandle* observer) DMUI_NOEXCEPT;
+typedef DMUI_Result (DMUI_CALL *DMUI_QueryServicesFn)(
+	DMUI_HostServicesInfo* services) DMUI_NOEXCEPT;
+// Enabled state is thread-safe. Disabling a held action preserves its owned key-up.
+typedef DMUI_Result (DMUI_CALL *DMUI_SetHotkeyActionEnabledFn)(
+	DMUI_ClientHandle client,
+	DMUI_HotkeyActionHandle action,
+	uint32_t enabled) DMUI_NOEXCEPT;
+typedef DMUI_Result (DMUI_CALL *DMUI_ImportD3D11ImageFn)(
+	DMUI_ClientHandle client,
+	const DMUI_D3D11ImageDescriptor* descriptor,
+	DMUI_ImageHandle* image) DMUI_NOEXCEPT;
+typedef DMUI_Result (DMUI_CALL *DMUI_DrawImageFn)(
+	DMUI_ClientHandle client,
+	DMUI_ImageHandle image,
+	const DMUI_ImageDrawOptions* options) DMUI_NOEXCEPT;
+typedef DMUI_Result (DMUI_CALL *DMUI_ReleaseImageFn)(
+	DMUI_ClientHandle client,
+	DMUI_ImageHandle image) DMUI_NOEXCEPT;
+// Released/invalidated status remains queryable only until the slot is reused.
+// Reuse advances the opaque handle generation; older handles then return STALE_HANDLE.
+typedef DMUI_Result (DMUI_CALL *DMUI_QueryImageFn)(
+	DMUI_ClientHandle client,
+	DMUI_ImageHandle image,
+	DMUI_ImageInfo* info) DMUI_NOEXCEPT;
+typedef DMUI_Result (DMUI_CALL *DMUI_ConfigureOverlayFn)(
+	DMUI_ClientHandle client,
+	DMUI_PageHandle page,
+	const DMUI_ManagedOverlayOptions* options) DMUI_NOEXCEPT;
+typedef DMUI_Result (DMUI_CALL *DMUI_QueryOverlayFn)(
+	DMUI_ClientHandle client,
+	DMUI_PageHandle page,
+	DMUI_ManagedOverlayPlacement* placement) DMUI_NOEXCEPT;
+typedef DMUI_Result (DMUI_CALL *DMUI_PostNotificationFn)(
+	DMUI_ClientHandle client,
+	const DMUI_NotificationDescriptor* descriptor) DMUI_NOEXCEPT;
+typedef DMUI_Result (DMUI_CALL *DMUI_DrawAnnotatedPlotFn)(
+	DMUI_ClientHandle client,
+	const char* id,
+	const DMUI_AnnotatedPlotDescriptor* descriptor) DMUI_NOEXCEPT;
+typedef DMUI_Result (DMUI_CALL *DMUI_RequestDialogFn)(
+	DMUI_ClientHandle client,
+	const DMUI_DialogDescriptor* descriptor,
+	DMUI_DialogHandle* dialog) DMUI_NOEXCEPT;
+// BUFFER_TOO_SMALL leaves the event pending and reports requiredTextCapacity.
+typedef DMUI_Result (DMUI_CALL *DMUI_PollDialogEventFn)(
+	DMUI_ClientHandle client,
+	DMUI_DialogHandle dialog,
+	DMUI_DialogEvent* event,
+	char* textBuffer,
+	uint32_t textCapacity) DMUI_NOEXCEPT;
+// accepted != 0 closes the dialog. Rejection optionally copies error and keeps text open.
+typedef DMUI_Result (DMUI_CALL *DMUI_ResolveDialogSubmissionFn)(
+	DMUI_ClientHandle client,
+	DMUI_DialogHandle dialog,
+	uint64_t submissionId,
+	uint32_t accepted,
+	const char* error) DMUI_NOEXCEPT;
+typedef DMUI_Result (DMUI_CALL *DMUI_CancelDialogFn)(
+	DMUI_ClientHandle client,
+	DMUI_DialogHandle dialog) DMUI_NOEXCEPT;
+typedef DMUI_Result (DMUI_CALL *DMUI_CreateImageFn)(
+	DMUI_ClientHandle client,
+	const DMUI_ImageDescriptor* descriptor,
+	DMUI_ImageHandle* image) DMUI_NOEXCEPT;
+typedef DMUI_Result (DMUI_CALL *DMUI_UpdateImageFn)(
+	DMUI_ClientHandle client,
+	DMUI_ImageHandle image,
+	const DMUI_ImageDescriptor* descriptor) DMUI_NOEXCEPT;
+// With no application, the OS-associated handler opens target. Arguments and
+// workingDirectory are then invalid. An explicit application must be an absolute
+// executable path. Its argv is application, supplied arguments, then target when
+// targetKind is not NONE. No shell command interpreter or placeholder expansion
+// is performed. Success means process creation or OS dispatch was accepted.
+typedef DMUI_Result (DMUI_CALL *DMUI_OpenExternalFn)(
+	DMUI_ClientHandle client,
+	const DMUI_ExternalOpenDescriptor* descriptor,
+	uint32_t* nativeError) DMUI_NOEXCEPT;
+typedef struct DMUI_UIAPIInfo DMUI_UIAPIInfo;
+typedef DMUI_Result (DMUI_CALL *DMUI_QueryUIAPIFn)(
+	uint32_t requestedUIAbi,
+	uint32_t minimumRevision,
+	uint32_t minimumTableSize,
+	DMUI_UIAPIInfo* info) DMUI_NOEXCEPT;
+// Pure, thread-safe query over immutable host icon data. A successful zero glyph
+// means no match; errors also leave glyph zero.
+typedef DMUI_Result (DMUI_CALL *DMUI_ResolveIconGlyphFn)(
+	const DMUI_IconResolutionRequest* request,
+	uint32_t* glyph) DMUI_NOEXCEPT;
+
+typedef struct DMUI_HostAPI
+{
+	uint32_t structSize;
+	uint32_t hostAbiVersion;
+	// Informational host API release label, independent of hostAbiVersion.
+	uint32_t apiVersion;
+	DMUI_RegisterClientFn registerClient;
+	DMUI_RegisterPageFn registerPage;
+	DMUI_QueryStateFn queryState;
+	DMUI_RequestFrameFn requestFrame;
+	DMUI_ReleaseFrameFn releaseFrame;
+	DMUI_IsMenuVisibleFn isMenuVisible;
+	DMUI_SelectPageFn selectPage;
+	DMUI_AttachSwapChainFn attachSwapChain;
+	DMUI_RegisterActionFn registerAction;
+	DMUI_SetStatusFn setStatus;
+	DMUI_GetThemeColorsFn getThemeColors;
+	DMUI_PushFontFn pushFont;
+	DMUI_PopFontFn popFont;
+	DMUI_DrawSectionHeaderFn drawSectionHeader;
+	DMUI_DrawSearchInputFn drawSearchInput;
+	DMUI_DrawCollapsingSectionHeaderFn drawCollapsingSectionHeader;
+	DMUI_DrawSettingsActionButtonFn drawSettingsActionButton;
+	DMUI_SettingsActionButtonWidthFn settingsActionButtonWidth;
+	DMUI_SettingsActionButtonExtentFn settingsActionButtonExtent;
+	DMUI_RegisterFrameObserverFn registerFrameObserver;
+	DMUI_QueryVideoMemoryFn queryVideoMemory;
+	DMUI_DrawBulletTextFn drawBulletText;
+	DMUI_RegisterHotkeyActionFn registerHotkeyAction;
+	DMUI_QueryHotkeyBindingFn queryHotkeyBinding;
+	DMUI_UnregisterHotkeyActionFn unregisterHotkeyAction;
+	DMUI_BeginSettingsTableFn beginSettingsTable;
+	DMUI_BeginSettingsRowFn beginSettingsRow;
+	DMUI_EndSettingsRowFn endSettingsRow;
+	DMUI_EndSettingsTableFn endSettingsTable;
+	DMUI_BeginSettingsRowExFn beginSettingsRowEx;
+	DMUI_RegisterPageActivityObserverFn registerPageActivityObserver;
+	DMUI_DrawLinkRowFn drawLinkRow;
+	DMUI_DrawFaqFn drawFaq;
+	DMUI_ReportDiagnosticFn reportDiagnostic;
+	DMUI_QueryServicesFn queryServices;
+	DMUI_SetHotkeyActionEnabledFn setHotkeyActionEnabled;
+	DMUI_ImportD3D11ImageFn importD3D11Image;
+	DMUI_DrawImageFn drawImage;
+	DMUI_ReleaseImageFn releaseImage;
+	DMUI_QueryImageFn queryImage;
+	DMUI_ConfigureOverlayFn configureOverlay;
+	DMUI_QueryOverlayFn queryOverlay;
+	DMUI_PostNotificationFn postNotification;
+	DMUI_DrawAnnotatedPlotFn drawAnnotatedPlot;
+	DMUI_RequestDialogFn requestDialog;
+	DMUI_PollDialogEventFn pollDialogEvent;
+	DMUI_ResolveDialogSubmissionFn resolveDialogSubmission;
+	DMUI_CancelDialogFn cancelDialog;
+	DMUI_CreateImageFn createImage;
+	DMUI_UpdateImageFn updateImage;
+	DMUI_RegisterCategoryFn registerCategory;
+	DMUI_OpenExternalFn openExternal;
+	DMUI_QueryUIAPIFn queryUIAPI;
+	DMUI_ResolveIconGlyphFn resolveIconGlyph;
+} DMUI_HostAPI;
+
+#define DMUI_HOST_API_REGISTER_CLIENT_SIZE \
+	((uint32_t)(offsetof(DMUI_HostAPI, registerClient) + sizeof(DMUI_RegisterClientFn)))
+#define DMUI_HOST_API_SELECT_PAGE_SIZE \
+	((uint32_t)(offsetof(DMUI_HostAPI, selectPage) + sizeof(DMUI_SelectPageFn)))
+#define DMUI_HOST_API_ATTACH_SWAP_CHAIN_SIZE \
+	((uint32_t)(offsetof(DMUI_HostAPI, attachSwapChain) + sizeof(DMUI_AttachSwapChainFn)))
+#define DMUI_HOST_API_REGISTER_ACTION_SIZE \
+	((uint32_t)(offsetof(DMUI_HostAPI, registerAction) + sizeof(DMUI_RegisterActionFn)))
+#define DMUI_HOST_API_SET_STATUS_SIZE \
+	((uint32_t)(offsetof(DMUI_HostAPI, setStatus) + sizeof(DMUI_SetStatusFn)))
+#define DMUI_HOST_API_GET_THEME_COLORS_SIZE \
+	((uint32_t)(offsetof(DMUI_HostAPI, getThemeColors) + sizeof(DMUI_GetThemeColorsFn)))
+#define DMUI_HOST_API_PUSH_FONT_SIZE \
+	((uint32_t)(offsetof(DMUI_HostAPI, pushFont) + sizeof(DMUI_PushFontFn)))
+#define DMUI_HOST_API_POP_FONT_SIZE \
+	((uint32_t)(offsetof(DMUI_HostAPI, popFont) + sizeof(DMUI_PopFontFn)))
+#define DMUI_HOST_API_DRAW_SECTION_HEADER_SIZE \
+	((uint32_t)(offsetof(DMUI_HostAPI, drawSectionHeader) + sizeof(DMUI_DrawSectionHeaderFn)))
+#define DMUI_HOST_API_DRAW_SEARCH_INPUT_SIZE \
+	((uint32_t)(offsetof(DMUI_HostAPI, drawSearchInput) + sizeof(DMUI_DrawSearchInputFn)))
+#define DMUI_HOST_API_DRAW_COLLAPSING_SECTION_HEADER_SIZE \
+	((uint32_t)(offsetof(DMUI_HostAPI, drawCollapsingSectionHeader) + sizeof(DMUI_DrawCollapsingSectionHeaderFn)))
+#define DMUI_HOST_API_DRAW_SETTINGS_ACTION_BUTTON_SIZE \
+	((uint32_t)(offsetof(DMUI_HostAPI, drawSettingsActionButton) + sizeof(DMUI_DrawSettingsActionButtonFn)))
+#define DMUI_HOST_API_SETTINGS_ACTION_BUTTON_WIDTH_SIZE \
+	((uint32_t)(offsetof(DMUI_HostAPI, settingsActionButtonWidth) + sizeof(DMUI_SettingsActionButtonWidthFn)))
+#define DMUI_HOST_API_SETTINGS_ACTION_BUTTON_EXTENT_SIZE \
+	((uint32_t)(offsetof(DMUI_HostAPI, settingsActionButtonExtent) + sizeof(DMUI_SettingsActionButtonExtentFn)))
+#define DMUI_HOST_API_REGISTER_FRAME_OBSERVER_SIZE \
+	((uint32_t)(offsetof(DMUI_HostAPI, registerFrameObserver) + sizeof(DMUI_RegisterFrameObserverFn)))
+#define DMUI_HOST_API_QUERY_VIDEO_MEMORY_SIZE \
+	((uint32_t)(offsetof(DMUI_HostAPI, queryVideoMemory) + sizeof(DMUI_QueryVideoMemoryFn)))
+#define DMUI_HOST_API_DRAW_BULLET_TEXT_SIZE \
+	((uint32_t)(offsetof(DMUI_HostAPI, drawBulletText) + sizeof(DMUI_DrawBulletTextFn)))
+#define DMUI_HOST_API_REGISTER_HOTKEY_ACTION_SIZE \
+	((uint32_t)(offsetof(DMUI_HostAPI, registerHotkeyAction) + sizeof(DMUI_RegisterHotkeyActionFn)))
+#define DMUI_HOST_API_QUERY_HOTKEY_BINDING_SIZE \
+	((uint32_t)(offsetof(DMUI_HostAPI, queryHotkeyBinding) + sizeof(DMUI_QueryHotkeyBindingFn)))
+#define DMUI_HOST_API_UNREGISTER_HOTKEY_ACTION_SIZE \
+	((uint32_t)(offsetof(DMUI_HostAPI, unregisterHotkeyAction) + sizeof(DMUI_UnregisterHotkeyActionFn)))
+#define DMUI_HOST_API_BEGIN_SETTINGS_TABLE_SIZE \
+	((uint32_t)(offsetof(DMUI_HostAPI, beginSettingsTable) + sizeof(DMUI_BeginSettingsTableFn)))
+#define DMUI_HOST_API_BEGIN_SETTINGS_ROW_SIZE \
+	((uint32_t)(offsetof(DMUI_HostAPI, beginSettingsRow) + sizeof(DMUI_BeginSettingsRowFn)))
+#define DMUI_HOST_API_END_SETTINGS_ROW_SIZE \
+	((uint32_t)(offsetof(DMUI_HostAPI, endSettingsRow) + sizeof(DMUI_EndSettingsRowFn)))
+#define DMUI_HOST_API_END_SETTINGS_TABLE_SIZE \
+	((uint32_t)(offsetof(DMUI_HostAPI, endSettingsTable) + sizeof(DMUI_EndSettingsTableFn)))
+#define DMUI_HOST_API_BEGIN_SETTINGS_ROW_EX_SIZE \
+	((uint32_t)(offsetof(DMUI_HostAPI, beginSettingsRowEx) + sizeof(DMUI_BeginSettingsRowExFn)))
+#define DMUI_HOST_API_REGISTER_PAGE_ACTIVITY_OBSERVER_SIZE \
+	((uint32_t)(offsetof(DMUI_HostAPI, registerPageActivityObserver) + sizeof(DMUI_RegisterPageActivityObserverFn)))
+#define DMUI_HOST_API_DRAW_LINK_ROW_SIZE \
+	((uint32_t)(offsetof(DMUI_HostAPI, drawLinkRow) + sizeof(DMUI_DrawLinkRowFn)))
+#define DMUI_HOST_API_DRAW_FAQ_SIZE \
+	((uint32_t)(offsetof(DMUI_HostAPI, drawFaq) + sizeof(DMUI_DrawFaqFn)))
+#define DMUI_HOST_API_REPORT_DIAGNOSTIC_SIZE \
+	((uint32_t)(offsetof(DMUI_HostAPI, reportDiagnostic) + sizeof(DMUI_ReportDiagnosticFn)))
+#define DMUI_HOST_API_QUERY_SERVICES_SIZE \
+	((uint32_t)(offsetof(DMUI_HostAPI, queryServices) + sizeof(DMUI_QueryServicesFn)))
+#define DMUI_HOST_API_SET_HOTKEY_ACTION_ENABLED_SIZE \
+	((uint32_t)(offsetof(DMUI_HostAPI, setHotkeyActionEnabled) + sizeof(DMUI_SetHotkeyActionEnabledFn)))
+#define DMUI_HOST_API_IMPORT_D3D11_IMAGE_SIZE \
+	((uint32_t)(offsetof(DMUI_HostAPI, importD3D11Image) + sizeof(DMUI_ImportD3D11ImageFn)))
+#define DMUI_HOST_API_DRAW_IMAGE_SIZE \
+	((uint32_t)(offsetof(DMUI_HostAPI, drawImage) + sizeof(DMUI_DrawImageFn)))
+#define DMUI_HOST_API_RELEASE_IMAGE_SIZE \
+	((uint32_t)(offsetof(DMUI_HostAPI, releaseImage) + sizeof(DMUI_ReleaseImageFn)))
+#define DMUI_HOST_API_QUERY_IMAGE_SIZE \
+	((uint32_t)(offsetof(DMUI_HostAPI, queryImage) + sizeof(DMUI_QueryImageFn)))
+#define DMUI_HOST_API_CONFIGURE_OVERLAY_SIZE \
+	((uint32_t)(offsetof(DMUI_HostAPI, configureOverlay) + sizeof(DMUI_ConfigureOverlayFn)))
+#define DMUI_HOST_API_QUERY_OVERLAY_SIZE \
+	((uint32_t)(offsetof(DMUI_HostAPI, queryOverlay) + sizeof(DMUI_QueryOverlayFn)))
+#define DMUI_HOST_API_POST_NOTIFICATION_SIZE \
+	((uint32_t)(offsetof(DMUI_HostAPI, postNotification) + sizeof(DMUI_PostNotificationFn)))
+#define DMUI_HOST_API_DRAW_ANNOTATED_PLOT_SIZE \
+	((uint32_t)(offsetof(DMUI_HostAPI, drawAnnotatedPlot) + sizeof(DMUI_DrawAnnotatedPlotFn)))
+#define DMUI_HOST_API_REQUEST_DIALOG_SIZE \
+	((uint32_t)(offsetof(DMUI_HostAPI, requestDialog) + sizeof(DMUI_RequestDialogFn)))
+#define DMUI_HOST_API_POLL_DIALOG_EVENT_SIZE \
+	((uint32_t)(offsetof(DMUI_HostAPI, pollDialogEvent) + sizeof(DMUI_PollDialogEventFn)))
+#define DMUI_HOST_API_RESOLVE_DIALOG_SUBMISSION_SIZE \
+	((uint32_t)(offsetof(DMUI_HostAPI, resolveDialogSubmission) + sizeof(DMUI_ResolveDialogSubmissionFn)))
+#define DMUI_HOST_API_CANCEL_DIALOG_SIZE \
+	((uint32_t)(offsetof(DMUI_HostAPI, cancelDialog) + sizeof(DMUI_CancelDialogFn)))
+#define DMUI_HOST_API_CREATE_IMAGE_SIZE \
+	((uint32_t)(offsetof(DMUI_HostAPI, createImage) + sizeof(DMUI_CreateImageFn)))
+#define DMUI_HOST_API_UPDATE_IMAGE_SIZE \
+	((uint32_t)(offsetof(DMUI_HostAPI, updateImage) + sizeof(DMUI_UpdateImageFn)))
+#define DMUI_HOST_API_REGISTER_CATEGORY_SIZE \
+	((uint32_t)(offsetof(DMUI_HostAPI, registerCategory) + sizeof(DMUI_RegisterCategoryFn)))
+#define DMUI_HOST_API_OPEN_EXTERNAL_SIZE \
+	((uint32_t)(offsetof(DMUI_HostAPI, openExternal) + sizeof(DMUI_OpenExternalFn)))
+#define DMUI_HOST_API_QUERY_UI_API_SIZE \
+	((uint32_t)(offsetof(DMUI_HostAPI, queryUIAPI) + sizeof(DMUI_QueryUIAPIFn)))
+#define DMUI_HOST_API_RESOLVE_ICON_GLYPH_SIZE \
+	((uint32_t)(offsetof(DMUI_HostAPI, resolveIconGlyph) + sizeof(DMUI_ResolveIconGlyphFn)))
+
+#if defined(_MSC_VER)
+#pragma pack(pop)
+#endif
+
+DMUI_EXPORT const DMUI_HostAPI* DMUI_CALL DMUI_GetAPI(
+	uint32_t requestedHostAbi) DMUI_NOEXCEPT;

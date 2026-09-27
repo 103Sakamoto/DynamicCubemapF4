@@ -1,0 +1,13 @@
+# Generated files
+**/build/
+**/.xmake/
+**/.vs/
+/dist/
+*.dll
+*.pdb
+*.obj
+*.ilk
+*.exp
+*.log
+*.zip
+/Data/MCM/Settings/
