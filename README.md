@@ -3,7 +3,7 @@
 Scene-based dynamic cubemap reflections for Fallout 4, with movement reprojection, separate sky history, authored material tint/intensity preservation, rain desaturation bypass and persistent MCM controls.
 
 ## Requirements
-- Supported game executables: OG 1.10.163, NG 1.10.984, AE 1.11.240. VR and 1.10.980 are not supported.
+- Supported game executables: OG 1.10.163, NG 1.10.984, AE 1.11.240.
 - F4SE and Address Library files matching the installed game runtime.
 - Fallout 4 Mod Configuration Menu for the in-game controls. Defaults remain available without its menu.
 
