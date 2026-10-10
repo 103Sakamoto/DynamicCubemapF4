@@ -22,6 +22,8 @@
 #include <DirectXMath.h>
 #include <wrl/client.h>
 
+#include "ReflectionInterop.h"
+
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -125,14 +127,16 @@ namespace
 	std::atomic_bool g_accumulating{ false };
 	// Capture history persists until replaced by a valid observation or reset.
 	std::uint64_t g_previousCompositeSequence = 0;
-	bool g_requestedEnabled=true;
+	std::atomic_bool g_requestedEnabled{true};
+    std::atomic_bool g_diagnosticsEnabled{false};
+    void SetDiagnosticsEnabled(bool enabled);
 	bool g_autoStartPending=false;
 	bool g_reprojectEnabled=true;
 	bool g_requestedReprojection=true;
-    int g_requestedRoughness=0;
+    int g_requestedRoughness=2;
     UINT g_materialMip=2;
-    constexpr UINT MaterialMipForMode(int mode) { return mode==1 ? 0u : (mode==2 ? 4u : 2u); }
-    static_assert(MaterialMipForMode(0)==2 && MaterialMipForMode(1)==0 && MaterialMipForMode(2)==4);
+    constexpr UINT MaterialMipForMode(int mode) { return static_cast<UINT>(mode); }
+    static_assert(MaterialMipForMode(0)==0 && MaterialMipForMode(1)==1 && MaterialMipForMode(2)==2 && MaterialMipForMode(3)==3 && MaterialMipForMode(4)==4);
 	ULONGLONG g_nextSettingsPoll=0;
 	constexpr float g_reprojectMinMove=2.0f;
 	constexpr float g_teleportResetDistance=2048.0f;
@@ -153,12 +157,14 @@ namespace
 	DrawInstanced_t g_originalDrawInstanced = nullptr;
 	bool g_liveCubemapSlots[128]{};
 	std::uint32_t g_liveCubemapSlotCount = 0;
+
 	void SetLiveCubemapSlot(UINT slot, bool bound);
 	Microsoft::WRL::ComPtr<ID3D11Buffer> g_rainNeutralFrameBuffer;
 	std::uint64_t g_rainNeutralFrameSequence = 0;
 	bool g_loggedRainDrawOverride = false;
 	Microsoft::WRL::ComPtr<ID3D11Texture2D> g_liveTexture;
 	Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> g_liveSRV;
+    std::array<Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>,8> g_liveMaterialViews;
 	Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> g_liveMipSource;
 	std::atomic_uint32_t g_callbackCount{ 0 };
 	std::atomic_uint32_t g_accumulatedFrames{ 0 };
@@ -444,8 +450,8 @@ cbuffer UpdateData : register(b0)
 
 float3 IrradianceToLinear(float3 color)
 {
-	// RT3 is already scene-linear. Do not darken valid geometry a second time.
-	return color;
+	// Fixed capture calibration (-2 EV); applied once before history accumulation.
+	return color * 0.25;
 }
 
 float3 GetSamplingVector(uint3 threadID)
@@ -680,7 +686,10 @@ void main(uint3 threadID : SV_DispatchThreadID)
 	const ULONGLONG g_logStart=GetTickCount64();
 	void Log(const std::string& text)
 	{
-		std::lock_guard lock(g_logMutex);
+		if (!g_diagnosticsEnabled.load(std::memory_order_relaxed) &&
+            text.find("FAIL")==std::string::npos && text.find("failed")==std::string::npos &&
+            text.find("aborted")==std::string::npos && text.find("unsupported")==std::string::npos) return;
+        std::lock_guard lock(g_logMutex);
 		std::ofstream log(kLogPath, std::ios::out | std::ios::app);
 		log << "[+" << (GetTickCount64()-g_logStart) << "ms] " << text << '\n';
 	}
@@ -895,7 +904,7 @@ bool VerifyNG984Mappings(std::uintptr_t deferred, std::uintptr_t anchor,
 			REL::ID{g_runtimeProfile.deferredDrawAnchorID}}.address();
 		const auto callsite = anchor ? anchor + g_runtimeProfile.deferredDrawAnchorOffset : 0;
 		const auto shaderManager = REL::ID{g_runtimeProfile.shaderManagerVtableID}.address();
-		if (g_runtimeProfile.family == RuntimeFamily::ae &&
+		if (g_diagnosticsEnabled && g_runtimeProfile.family == RuntimeFamily::ae &&
 			!VerifyAE240Mappings(deferred,anchor,callsite,shaderManager)) return false;
 		if (g_runtimeProfile.family == RuntimeFamily::ng &&
 			!VerifyNG984Mappings(deferred,anchor,callsite,shaderManager)) return false;
@@ -1110,8 +1119,9 @@ using Microsoft::WRL::ComPtr;
 		const bool enabled=ReadMCMInt("bEnabled",1)!=0;
 		if (enabled!=g_requestedEnabled) g_autoStartPending=true;
 		g_requestedEnabled=enabled;
+        SetDiagnosticsEnabled(enabled && ReadMCMInt("bDiagnostics",0)!=0);
 		g_requestedReprojection=ReadMCMInt("bReprojection",1)!=0;
-        g_requestedRoughness=std::clamp(ReadMCMInt("iRoughnessMode",0),0,2);
+        g_requestedRoughness=std::clamp(ReadMCMInt("iSharpnessMode",2),0,4);
 	}
 
 	std::string Ptr(const void* p)
@@ -1147,6 +1157,7 @@ struct UniversalStyleConstants
 };
 struct UniversalPool
 {
+    std::array<Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>,8> materialViews;
     UINT cubes = 0;
     int exteriorMatchState=-4;
 	bool standalone=false;
@@ -1169,10 +1180,22 @@ struct UniversalEntry
 	bool analyzed=false;
 	bool keepOriginal=false;
 	bool loggedStyledBinding=false;
+    bool exteriorBrightness=false;
 };
 std::unordered_map<ID3D11ShaderResourceView*, UniversalEntry> g_universalViews;
-std::unordered_map<ID3D11ShaderResourceView*, Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>> g_universalNonCubeViews;
+struct NonCubeCacheEntry {
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> view;
+    std::size_t slot;
+    ID3D11ShaderResourceView* operator->() const { return view.Get(); }
+};
+std::unordered_map<ID3D11ShaderResourceView*, NonCubeCacheEntry> g_universalNonCubeViews;
+std::array<ID3D11ShaderResourceView*,1024> g_nonCubeClock{};
+std::array<bool,1024> g_nonCubeRecent{};
+std::size_t g_nonCubeHand=0;
 std::vector<UniversalPool> g_universalPools;
+std::unordered_map<ID3D11ShaderResourceView*, ID3D11ShaderResourceView*> g_materialViewLookup;
+std::uint64_t g_cacheHits=0,g_cacheMisses=0,g_cacheInserts=0,g_cacheEvictions=0;
+struct BindingResult { ID3D11ShaderResourceView* view; bool replacement; };
 Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> g_universalSlots[128];
 Microsoft::WRL::ComPtr<ID3D11ComputeShader> g_universalReplicateCS;
 std::array<Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>, 8> g_universalLiveMipSRVs;
@@ -1199,37 +1222,101 @@ bool UniversalFloatSampleFormat(DXGI_FORMAT f)
     }
 }
 
+void ResetNonCubeCache()
+{
+    g_nonCubeClock.fill(nullptr); g_nonCubeRecent.fill(false); g_nonCubeHand=0;
+    g_universalNonCubeViews.clear();
+}
+void CacheNonCubeView(ID3D11ShaderResourceView* view)
+{
+    // Only called for a newly classified ordinary view on the render thread.
+    while(g_nonCubeClock[g_nonCubeHand] && g_nonCubeRecent[g_nonCubeHand]) {
+        g_nonCubeRecent[g_nonCubeHand]=false;
+        g_nonCubeHand=(g_nonCubeHand+1)%g_nonCubeClock.size();
+    }
+    const auto slot=g_nonCubeHand;
+    if(auto* old=g_nonCubeClock[slot]) { if(g_diagnosticsEnabled) ++g_cacheEvictions; g_universalNonCubeViews.erase(old); }
+    if(g_diagnosticsEnabled) ++g_cacheInserts;
+    g_universalNonCubeViews.emplace(view,NonCubeCacheEntry{view,slot});
+    g_nonCubeClock[slot]=view; g_nonCubeRecent[slot]=true;
+    g_nonCubeHand=(slot+1)%g_nonCubeClock.size();
+}
+
+// Rebuilt only when owned views change, never for ordinary texture bindings.
+// Keys and values are borrowed from the live/pool ComPtrs and their mip caches.
+void RebuildMaterialViewLookup()
+{
+    g_materialViewLookup.clear();
+    const auto add=[](ID3D11ShaderResourceView* view, ID3D11ShaderResourceView* current) {
+        if (view && current) g_materialViewLookup.emplace(view,current);
+    };
+    add(g_liveSRV.Get(),g_liveSRV.Get());
+    for (const auto& pool:g_universalPools) add(pool.view.Get(),pool.view.Get());
+    for (const auto& view:g_liveMaterialViews) add(view.Get(),g_liveSRV.Get());
+    for (const auto& pool:g_universalPools)
+        for (const auto& view:pool.materialViews) add(view.Get(),pool.view.Get());
+}
+ID3D11ShaderResourceView* CurrentMaterialView(ID3D11ShaderResourceView* view)
+{
+    if (!view) return nullptr;
+    const auto found=g_materialViewLookup.find(view);
+    return found==g_materialViewLookup.end() ? nullptr : found->second;
+}
 bool UniversalIsOurs(ID3D11ShaderResourceView* view)
 {
-    if (!view) return false;
-    if (view == g_liveSRV.Get()) return true;
-    for (const auto& pool : g_universalPools)
-        if (view == pool.view.Get()) return true;
-    return false;
+    return CurrentMaterialView(view)!=nullptr;
 }
 
 bool g_namedReferenceReady=false;
 std::unordered_set<ID3D11ShaderResourceView*> g_directAnalysisLogged;
 
-ID3D11ShaderResourceView* UniversalBind(UINT slot, ID3D11ShaderResourceView* view)
+void TagReflectionReplacement(ID3D11DeviceChild* resource)
 {
-    if (UniversalIsOurs(view)) return view;
-    if (!view) { g_universalSlots[slot].Reset(); return view; }
-    if (g_universalNonCubeViews.find(view) != g_universalNonCubeViews.end()) {
-        g_universalSlots[slot].Reset();
-        return view;
+    if (RealisticReflections::Interop::TagPeerReplacement(resource)) return;
+    static bool loggedFailure=false;
+    if (!loggedFailure) {
+        Log("INTEROP: replacement ownership tag failed; peer recognition unavailable for this resource.");
+        loggedFailure=true;
     }
+}
+
+bool IsExteriorFallbackView(ID3D11ShaderResourceView* view);
+
+BindingResult UniversalBind(UINT slot, ID3D11ShaderResourceView* view)
+{
+    if (auto* selected=CurrentMaterialView(view)) {
+        if (selected!=view) {
+            static bool loggedRetained=false;
+            if (!loggedRetained) { Log("MIP: retained replacement view redirected to current softness."); loggedRetained=true; }
+        }
+        return {selected,true};
+    }
+    if (!view) { g_universalSlots[slot].Reset(); return {view,false}; }
+    if (const auto cached=g_universalNonCubeViews.find(view); cached != g_universalNonCubeViews.end()) {
+        g_nonCubeRecent[cached->second.slot]=true;
+        if(g_diagnosticsEnabled) ++g_cacheHits;
+        g_universalSlots[slot].Reset();
+        return {view,false};
+    }
+    if(g_diagnosticsEnabled) ++g_cacheMisses;
     auto found = g_universalViews.find(view);
     if (found != g_universalViews.end()) {
         g_universalSlots[slot] = view;
-        if (!g_liveReady || !g_namedReferenceReady) return view;
-        if (g_universalComputeFailed) return view;
+        if (!g_liveReady || !g_namedReferenceReady) return {view,false};
+        if (g_universalComputeFailed) return {view,false};
 		if (found->second.directCube)
 		{
-			if (!found->second.analyzed || found->second.keepOriginal) return view;
+			if (!found->second.analyzed && IsExteriorFallbackView(view)) {
+                // The named reference is probed separately; it needs no material tint.
+                found->second.analyzed=true;
+                found->second.keepOriginal=false;
+                found->second.exteriorBrightness=false;
+                Log("TINT BIND: named standalone exterior uses calibrated live cube; no output scaling.");
+            }
+            if (!found->second.analyzed || found->second.keepOriginal) return {view,false};
 			if (found->second.pool!=UINT_MAX && found->second.pool<g_universalPools.size()) {
 				const auto& pool=g_universalPools[found->second.pool];
-				if (pool.failed) return view;
+				if (pool.failed) return {view,false};
 				if (pool.ready) {
 					if (!found->second.loggedStyledBinding) {
 						Log("TINT BIND: standalone pool="+
@@ -1237,33 +1324,47 @@ ID3D11ShaderResourceView* UniversalBind(UINT slot, ID3D11ShaderResourceView* vie
 							std::to_string(pool.style.intensity[0].x));
 						found->second.loggedStyledBinding=true;
 					}
-					return pool.view.Get();
+					return {pool.view.Get(),true};
 				}
-                return view;
+                return {view,false};
 			}
-			return g_liveSRV.Get();
+            // A recognized exterior requires its intensity-scaled pool. Keep the
+            // authored cube if capacity prevented allocating one.
+			return found->second.exteriorBrightness ? BindingResult{view,false} : BindingResult{g_liveSRV.Get(),true};
 		}
         if (found->second.pool != UINT_MAX) {
             const auto& pool = g_universalPools[found->second.pool];
-            if (pool.ready && pool.exteriorMatchState!=-4 && pool.exteriorMatchState!=-3) return pool.view.Get();
+            if (pool.ready && pool.exteriorMatchState!=-4 && pool.exteriorMatchState!=-3) return {pool.view.Get(),true};
         }
-        return view;
+        return {view,false};
+    }
+    // Ownership tags must be set before the first bind and remain immutable.
+    // Peer views stay uncached, so this check runs on each of their binds.
+    if (RealisticReflections::Interop::IsOwned(view)) {
+        // Preserve the authored view across a peer's temporary draw override.
+        // When the peer restores our stand-in, UniversalIsOurs returns early;
+        // clearing this slot here would make a later repair restore nullptr.
+        // Never store the peer view itself.
+        static bool loggedPeer=false;
+        if (!loggedPeer) {
+            Log("INTEROP: RR-owned view observed; binding preserved.");
+            loggedPeer=true;
+        }
+        return {view,false};
     }
     D3D11_SHADER_RESOURCE_VIEW_DESC viewDesc{}; view->GetDesc(&viewDesc);
     const bool isCube = viewDesc.ViewDimension == D3D11_SRV_DIMENSION_TEXTURECUBE;
     const bool isArray = viewDesc.ViewDimension == D3D11_SRV_DIMENSION_TEXTURECUBEARRAY;
     if (!isCube && !isArray) {
-        if (g_universalNonCubeViews.size() >= 512)
-            g_universalNonCubeViews.erase(g_universalNonCubeViews.begin());
-        g_universalNonCubeViews.emplace(view, view);
+        CacheNonCubeView(view);
         g_universalSlots[slot].Reset();
-        return view;
+        return {view,false};
     }
     // Apply the same admission limit to both cube layouts. Existing entries
     // were handled above; rejected views remain original and untracked.
     if (g_universalViews.size() >= 4096 || g_universalComputeFailed) {
         g_universalSlots[slot].Reset();
-        return view;
+        return {view,false};
     }
     // Standalone TextureCube users (notably BGEM glass and some lenses) can
     // consume the published cube directly. Register them as entries so the
@@ -1277,7 +1378,7 @@ ID3D11ShaderResourceView* UniversalBind(UINT slot, ID3D11ShaderResourceView* vie
             Log("UNIVERSAL: standalone TextureCube bindings use the live cube directly.");
             loggedDirectCube = true;
         }
-        return view;
+        return {view,false};
     }
     {
         // This cache contains cube views only. New views remain vanilla if the
@@ -1313,12 +1414,12 @@ ID3D11ShaderResourceView* UniversalBind(UINT slot, ID3D11ShaderResourceView* vie
         found = g_universalViews.emplace(view, entry).first;
     }
     g_universalSlots[slot] = view;
-    if (!g_liveReady || !g_namedReferenceReady) return view;
+    if (!g_liveReady || !g_namedReferenceReady) return {view,false};
     if (found->second.pool != UINT_MAX) {
         const auto& pool = g_universalPools[found->second.pool];
-        if (pool.ready && pool.exteriorMatchState!=-4 && pool.exteriorMatchState!=-3) return pool.view.Get();
+        if (pool.ready && pool.exteriorMatchState!=-4 && pool.exteriorMatchState!=-3) return {pool.view.Get(),true};
     }
-    return view;
+    return {view,false};
 }
 
 void UniversalRepair(bool restore)
@@ -1328,9 +1429,10 @@ void UniversalRepair(bool restore)
     g_liveContext->PSGetShaderResources(0, 128, views);
     for (UINT i = 0; i < 128; ++i) {
         auto* original = UniversalIsOurs(views[i]) ? g_universalSlots[i].Get() : views[i];
-        auto* next = (!restore && g_liveEnabled && g_liveReady) ? UniversalBind(i, original) : original;
+        const auto binding = (!restore && g_liveEnabled && g_liveReady) ? UniversalBind(i, original) : BindingResult{original,false};
+        auto* next=binding.view;
         if (next != views[i]) g_originalPSResources(g_liveContext, i, 1, &next);
-		SetLiveCubemapSlot(i, UniversalIsOurs(next));
+		SetLiveCubemapSlot(i, binding.replacement);
         if (views[i]) views[i]->Release();
     }
 }
@@ -1365,7 +1467,7 @@ void main(uint3 id : SV_DispatchThreadID)
         float oldY=dot(source.rgb,weights);
         float3 colored=source.rgb*tint.rgb;
         colored*=oldY/max(dot(colored,weights),0.0001);
-        source.rgb=lerp(oldY.xxx,colored,saturate(tint.w));
+        source.rgb=colored;
     }
 	// Preserve the original cubemap's authored reflection intensity without
 	// changing roughness, alpha, or the material's transparency parameters.
@@ -1409,11 +1511,11 @@ bool UniversalEnsureCompute(ID3D11Device* device)
             return false;
         }
     }
-    Log("UNIVERSAL: compute array replication ready (8 dispatches per pool update).");
+    Log("UNIVERSAL: compute array replication ready (selected mip only).");
     return true;
 }
 
-void UniversalReplicatePool(UniversalPool& pool)
+void UniversalReplicatePool(UniversalPool& pool, UINT mip)
 {
     ID3D11ComputeShader* oldCS = nullptr;
     ID3D11ClassInstance* oldInstances[256]{}; UINT oldInstanceCount=256;
@@ -1431,7 +1533,7 @@ void UniversalReplicatePool(UniversalPool& pool)
 	}
 	auto* tintCB=pool.tintConstants.Get();
 	g_liveContext->CSSetConstantBuffers(0,1,&tintCB);
-    for (UINT mip = 0; mip < 8; ++mip) {
+    {
         ID3D11ShaderResourceView* sources[2]{
             g_universalLiveMipSRVs[mip].Get(),pool.originalMipSRVs[mip].Get()};
         auto* destination = pool.mipUAVs[mip].Get();
@@ -1459,9 +1561,11 @@ void UniversalPublish()
 {
     Microsoft::WRL::ComPtr<ID3D11Device> device;
     g_liveContext->GetDevice(device.GetAddressOf());
+    bool materialViewsChanged=false;
     // Keep arrays synchronized with each newly published, temporally accumulated cube.
     for (auto& pool : g_universalPools) {
         if (pool.texture || pool.failed) continue;
+        materialViewsChanged=true;
         D3D11_TEXTURE2D_DESC d{};
         d.Width = d.Height = 128; d.MipLevels = 8; d.ArraySize = pool.cubes * 6;
         d.Format = DXGI_FORMAT_R16G16B16A16_FLOAT; d.SampleDesc.Count = 1;
@@ -1481,6 +1585,7 @@ void UniversalPublish()
 			v.TextureCubeArray.NumCubes = pool.cubes;
 		}
         HRESULT poolResult = device->CreateTexture2D(&d, nullptr, pool.texture.GetAddressOf());
+        if (SUCCEEDED(poolResult)) TagReflectionReplacement(pool.texture.Get());
         if (SUCCEEDED(poolResult))
             poolResult = device->CreateShaderResourceView(pool.texture.Get(), &v, pool.view.GetAddressOf());
 		D3D11_BUFFER_DESC cb{}; cb.ByteWidth=sizeof(UniversalStyleConstants); cb.Usage=D3D11_USAGE_DEFAULT;
@@ -1524,6 +1629,7 @@ void UniversalPublish()
             Log("UNIVERSAL: replacement array allocation failed; original retained.");
         }
     }
+    if (materialViewsChanged) RebuildMaterialViewLookup();
     const bool useCompute = UniversalEnsureCompute(device.Get());
     if (!useCompute) {
         for (auto& pool : g_universalPools) pool.ready=false;
@@ -1531,7 +1637,7 @@ void UniversalPublish()
     }
     for (auto& pool : g_universalPools) {
         if (!pool.texture || pool.failed) continue;
-        UniversalReplicatePool(pool);
+        UniversalReplicatePool(pool, g_materialMip);
         // Initial arrays must be regenerated after reference analysis. Subsequent
         // tint edits leave this completed output available until the next update.
         pool.ready = pool.standalone ||
@@ -1547,7 +1653,9 @@ void UniversalReset()
 	for (auto& bound : g_liveCubemapSlots) bound = false;
 	g_liveCubemapSlotCount = 0;
 	g_rainNeutralFrameSequence = 0;
-    g_universalViews.clear(); g_universalNonCubeViews.clear(); g_universalPools.clear();
+    g_materialViewLookup.clear();
+    g_universalViews.clear(); ResetNonCubeCache(); g_universalPools.clear();
+    RebuildMaterialViewLookup();
     g_universalTotalCubes = 0;
     g_universalComputeFailed = false;
     g_universalReplicateCS.Reset();
@@ -1699,6 +1807,7 @@ void SubmitCellFallback(const CellFallbackLoadScope& scope,const char* route)
 }
 void CellFallbackLoadHook(void* self,RE::NiTexture* texture)
 {
+    // Observe engine loads even while disabled so later MCM enable has a reference.
     const int kind=NamedFallbackKind(texture);
     if (!kind || !EnsureCellFallbackDeviceHooks()) { g_originalCellFallbackLoad(self,texture); return; }
     CellFallbackLoadScope scope{}; scope.kind=kind; auto* prior=g_cellFallbackScope; g_cellFallbackScope=&scope;
@@ -1706,6 +1815,7 @@ void CellFallbackLoadHook(void* self,RE::NiTexture* texture)
 }
 bool CellFallbackReadHook(void* self,RE::NiTexture* texture,void* userData)
 {
+    // Streaming may load the reference only once during a disabled session.
     const int kind=NamedFallbackKind(texture);
     if (!kind || !EnsureCellFallbackDeviceHooks()) return g_originalCellFallbackRead(self,texture,userData);
     CellFallbackLoadScope scope{}; scope.kind=kind; auto* prior=g_cellFallbackScope; g_cellFallbackScope=&scope;
@@ -1762,7 +1872,7 @@ Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> AcquireNamedCellFallback()
 float UniversalAuthoredIntensity(float luminance, bool usable, bool consistent)
 {
     return (usable && consistent) ?
-        std::clamp(std::sqrt(std::clamp(luminance,0.0f,1.0f)),0.15f,1.0f) : 1.0f;
+        std::clamp(std::sqrt(std::clamp(luminance,0.0f,1.0f)),0.02f,1.0f) : 1.0f;
 }
 struct TintProbeResult { float r,g,b,saturation; float consistency,pad0,pad1,pad2;
     std::array<XMFLOAT4,96> signature{};
@@ -2222,8 +2332,12 @@ void TintAnalysisTick(ID3D11Device* device)
                 const bool uncertainExterior=g_exteriorReferenceValid && !exteriorAtlasCube &&
                     ExteriorSignatureMatches(v,g_exteriorReference);
 				const float luminance=0.2126f*v.r+0.7152f*v.g+0.0722f*v.b;
-				const bool usable=luminance>0.00001f && !exteriorAtlasCube;
-				const bool consistent=v.saturation<0.12f || v.consistency>=0.72f;
+                const bool hasLuminance=std::isfinite(luminance) && luminance>0.00001f;
+				const bool usable=hasLuminance && !exteriorAtlasCube;
+				const bool consistent=v.consistency>=0.72f;
+                // Exterior recognition excludes authored color, not authored energy.
+                const float authoredIntensity=exteriorAtlasCube ? 1.0f : UniversalAuthoredIntensity(
+                    luminance,hasLuminance,consistent || exteriorAtlasCube);
 				const bool colorful=usable && v.saturation>=0.12f;
 				// With an unresolved exterior identity, retain neutral array entries rather than desaturating them.
                 const bool unresolvedNeutral=g_tintProbePendingPool<g_universalPools.size() &&
@@ -2232,16 +2346,17 @@ void TintAnalysisTick(ID3D11Device* device)
                 // retain original texels until a later analysis supplies authored intensity.
                 const bool unresolvedArrayData=g_tintProbePendingPool<g_universalPools.size() &&
                     !g_universalPools[g_tintProbePendingPool].standalone && !usable && !exteriorAtlasCube;
-                const bool keepOriginal=(colorful && !consistent) || unresolvedNeutral || unresolvedArrayData || uncertainExterior;
-				const char* classification=uncertainExterior?"UNCERTAIN_EXTERIOR_ORIGINAL":unresolvedArrayData?"PENDING_DATA_ORIGINAL":unresolvedNeutral?"UNRESOLVED_NEUTRAL_ORIGINAL":exteriorAtlasCube?"EXTERIOR_EXCLUDED":(!usable?"NO_DATA":(v.saturation<0.12f?"NEUTRAL_DESATURATE":
+                const bool keepOriginal=(usable && !consistent) || unresolvedNeutral || unresolvedArrayData || uncertainExterior;
+				const char* classification=uncertainExterior?"UNCERTAIN_EXTERIOR_ORIGINAL":unresolvedArrayData?"PENDING_DATA_ORIGINAL":unresolvedNeutral?"UNRESOLVED_NEUTRAL_ORIGINAL":exteriorAtlasCube?"EXTERIOR_EXCLUDED":(!usable?"NO_DATA":(v.saturation<0.12f?"NEUTRAL_TINT":
                     (consistent?"CONSISTENT_TINT":"KEEP_ORIGINAL")));
 				if (g_tintProbePendingPool==UINT_MAX) {
 					auto direct=g_universalViews.find(g_tintProbePendingView.Get());
 					if (direct!=g_universalViews.end() && direct->second.directCube) {
 						const bool firstAnalysis=g_directAnalysisLogged.insert(g_tintProbePendingView.Get()).second;
 						direct->second.analyzed=usable || exteriorAtlasCube;
+                        direct->second.exteriorBrightness=exteriorAtlasCube;
 						direct->second.keepOriginal=keepOriginal;
-						if (usable && !keepOriginal && direct->second.pool==UINT_MAX &&
+						if ((usable || exteriorAtlasCube) && !keepOriginal && direct->second.pool==UINT_MAX &&
 							g_universalTotalCubes<128) {
 							direct->second.pool=static_cast<UINT>(g_universalPools.size());
 							UniversalPool pool; pool.cubes=1; pool.standalone=true;
@@ -2253,7 +2368,7 @@ void TintAnalysisTick(ID3D11Device* device)
 									std::clamp(v.saturation,0.0f,1.0f)) : XMFLOAT4(1,1,1,-1);
 							// Use the same authored-luminance policy for every consistent color,
 							// independent of saturation and resource layout.
-							const float directIntensity=UniversalAuthoredIntensity(luminance,usable,consistent);
+							const float directIntensity=authoredIntensity;
 							pool.style.intensity[0]=XMFLOAT4(directIntensity,0,0,0);
 							g_universalPools.push_back(std::move(pool)); ++g_universalTotalCubes;
 						}
@@ -2262,14 +2377,14 @@ void TintAnalysisTick(ID3D11Device* device)
 							auto& pool=g_universalPools[direct->second.pool];
 							pool.style.tint[0]=exteriorAtlasCube ? XMFLOAT4(1,1,1,-1) :
                                 XMFLOAT4(v.r/luminance,v.g/luminance,v.b/luminance,std::clamp(v.saturation,0.0f,1.0f));
-							const float directIntensity=UniversalAuthoredIntensity(luminance,usable,consistent);
+							const float directIntensity=authoredIntensity;
 							pool.style.intensity[0]=XMFLOAT4(directIntensity,0,0,0);
 							pool.tintDirty=true;
 						}
 						// A streamed standalone cube may initially report NO_DATA. Retry it
 						// instead of permanently retaining an unstyled live binding.
 						if (usable || exteriorAtlasCube) g_tintProbeDone.insert(g_tintProbePendingView.Get());
-						const float loggedIntensity=UniversalAuthoredIntensity(luminance,usable,consistent);
+						const float loggedIntensity=authoredIntensity;
 						if (firstAnalysis || (usable && !direct->second.loggedStyledBinding)) {
 							Log(std::string("TINT DIRECT: saturation=")+std::to_string(v.saturation)+
 								" consistency="+std::to_string(v.consistency)+
@@ -2289,7 +2404,7 @@ void TintAnalysisTick(ID3D11Device* device)
 					// Apply luminance scaling to all consistent authored colors.
 					// Hue preservation and brightness preservation are independent.
 					// Inconsistent saturated cubes still copy their original texels.
-					const float intensity=UniversalAuthoredIntensity(luminance,usable,consistent);
+					const float intensity=authoredIntensity;
 					const auto& oldTint=pool.style.tint[cube];
 					const float oldIntensity=pool.style.intensity[cube].x;
 					const bool changed=std::abs(oldTint.x-newTint.x)>0.0001f ||
@@ -2414,6 +2529,7 @@ void ResetTintAnalysis()
     g_tintProbeFailed=false;
 }
 
+#include "PerformanceDiagnostics.h"
 	void SetLiveCubemapSlot(UINT slot, bool bound)
 	{
 		if (slot >= 128 || g_liveCubemapSlots[slot] == bound) return;
@@ -2500,7 +2616,7 @@ void ResetTintAnalysis()
 		g_rainAuditDue=false;
 		ID3D11ShaderResourceView* views[128]{};
 		context->PSGetShaderResources(0,128,views);
-		++g_rainStats.audits;
+		{ if(g_diagnosticsEnabled) ++g_rainStats.audits; }
 		bool changed=false;
 		for (UINT i=0;i<128;++i) {
 			const bool ours=views[i] && UniversalIsOurs(views[i]);
@@ -2508,7 +2624,7 @@ void ResetTintAnalysis()
 			SetLiveCubemapSlot(i,ours);
 			if (views[i]) views[i]->Release();
 		}
-		if (changed) ++g_rainStats.repairs;
+		if (changed) { if(g_diagnosticsEnabled) ++g_rainStats.repairs; }
 	}
 
 	void ReportRainDraws(ULONGLONG now)
@@ -2543,30 +2659,37 @@ void ResetTintAnalysis()
 		if (context != g_liveContext || !g_liveEnabled || !g_gameplayReady.load()) {
 			draw(); return;
 		}
-		++g_rainStats.draws;
+		{ if(g_diagnosticsEnabled) ++g_rainStats.draws; }
 		AuditRainBindings(context);
 		if (g_liveCubemapSlotCount==0) {
-			++g_rainStats.noLive;
+			{ if(g_diagnosticsEnabled) ++g_rainStats.noLive; }
+			draw(); return;
+		}
+		// A valid neutral snapshot needs no b12 query or replacement.
+		const auto& desaturation=g_latestMappedFrame.iblDesaturation;
+		if (g_latestMappedValid && std::isfinite(desaturation.x) && std::isfinite(desaturation.y) &&
+			desaturation.x<=0.00001f && desaturation.y<=0.00001f) {
+			{ if(g_diagnosticsEnabled) ++g_rainStats.neutral; }
 			draw(); return;
 		}
 		ID3D11Buffer* original = nullptr;
 		context->PSGetConstantBuffers(12, 1, &original);
 		if (!original) {
-			++g_rainStats.noBuffer;
+			{ if(g_diagnosticsEnabled) ++g_rainStats.noBuffer; }
 			draw(); return;
 		}
 		if (original != g_enginePerFrameIdentity.load(std::memory_order_relaxed)) {
-			++g_rainStats.wrongBuffer;
+			{ if(g_diagnosticsEnabled) ++g_rainStats.wrongBuffer; }
 			original->Release(); draw(); return;
 		}
 		if (!PrepareRainNeutralFrameBuffer(context)) {
 			const auto& v=g_latestMappedFrame.iblDesaturation;
 			if (g_latestMappedValid && std::isfinite(v.x) && std::isfinite(v.y) &&
-				v.x<=0.00001f && v.y<=0.00001f) ++g_rainStats.neutral;
-			else ++g_rainStats.unavailable;
+				v.x<=0.00001f && v.y<=0.00001f) { if(g_diagnosticsEnabled) ++g_rainStats.neutral; }
+			else { if(g_diagnosticsEnabled) ++g_rainStats.unavailable; }
 			original->Release(); draw(); return;
 		}
-		++g_rainStats.applied;
+		{ if(g_diagnosticsEnabled) ++g_rainStats.applied; }
 		ID3D11Buffer* neutral = g_rainNeutralFrameBuffer.Get();
 		context->PSSetConstantBuffers(12, 1, &neutral);
 		draw();
@@ -2581,11 +2704,13 @@ void ResetTintAnalysis()
 			context != g_liveContext || start >= 128 || count > 128-start) {
 			g_originalPSResources(context,start,count,views); return;
 		}
-		ID3D11ShaderResourceView* replacement[128]{};
+		PerfHookScope perfHook;
+        ID3D11ShaderResourceView* replacement[128]{};
 		for (UINT i=0;i<count;++i) {
 			auto* input=views ? views[i] : nullptr;
-			replacement[i]=views ? UniversalBind(start+i,input) : input;
-			SetLiveCubemapSlot(start+i,replacement[i] && UniversalIsOurs(replacement[i]));
+			const auto binding=views ? UniversalBind(start+i,input) : BindingResult{input,false};
+            replacement[i]=binding.view;
+            SetLiveCubemapSlot(start+i,binding.replacement);
 		}
 		g_originalPSResources(context,start,count,replacement);
 	}
@@ -2712,7 +2837,7 @@ void ResetTintAnalysis()
 		std::uint32_t,
 		std::uint32_t residualR9d)
 	{
-		if (g_liveEnabled && g_runtimeProfile.family == RuntimeFamily::ae && g_insideDeferredLights) {
+		if (g_diagnosticsEnabled && g_liveEnabled && g_runtimeProfile.family == RuntimeFamily::ae && g_insideDeferredLights) {
 			++g_aeDrawVisits;
 			if (residualR9d == 2) ++g_aeWorldDrawVisits;
 		}
@@ -4741,17 +4866,19 @@ void ResetTintAnalysis()
 
     bool ApplyMaterialMip(UINT mip)
     {
+        if (mip>=kCubeMipCount) return false;
         if (mip==g_materialMip) return true;
         if (!g_liveContext) { g_materialMip=mip; return true; }
         Microsoft::WRL::ComPtr<ID3D11Device> device;
         g_liveContext->GetDevice(device.GetAddressOf());
         if (!device) return false;
         using View=Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>;
-        struct PendingView { View* target; View replacement; };
+        struct PendingView { View* target; std::array<View,8>* cache; View replacement; };
         std::vector<PendingView> pending;
         pending.reserve(g_universalPools.size()+1);
-        const auto prepare=[&](View& view) {
+        const auto prepare=[&](View& view, std::array<View,8>& cache) {
             if (!view) return true;
+            cache[g_materialMip]=view;
             D3D11_SHADER_RESOURCE_VIEW_DESC desc{}; view->GetDesc(&desc);
             if (desc.ViewDimension==D3D11_SRV_DIMENSION_TEXTURECUBE) {
                 desc.TextureCube.MostDetailedMip=mip; desc.TextureCube.MipLevels=1;
@@ -4759,17 +4886,33 @@ void ResetTintAnalysis()
                 desc.TextureCubeArray.MostDetailedMip=mip; desc.TextureCubeArray.MipLevels=1;
             } else return false;
             Microsoft::WRL::ComPtr<ID3D11Resource> resource; view->GetResource(resource.GetAddressOf());
-            PendingView entry{&view,{}};
-            if (FAILED(device->CreateShaderResourceView(resource.Get(),&desc,entry.replacement.GetAddressOf()))) return false;
+            PendingView entry{&view,&cache,{}};
+            if (cache[mip]) entry.replacement=cache[mip];
+            else if (FAILED(device->CreateShaderResourceView(resource.Get(),&desc,entry.replacement.GetAddressOf()))) return false;
             pending.push_back(std::move(entry));
             return true;
         };
-        if (!prepare(g_liveSRV)) return false;
-        for (auto& pool:g_universalPools) if (!prepare(pool.view)) return false;
+        if (!prepare(g_liveSRV,g_liveMaterialViews)) return false;
+        for (auto& pool:g_universalPools) if (!prepare(pool.view,pool.materialViews)) return false;
+        // Validate before changing bindings; a pool can exist before its first publication.
+        for (auto& pool:g_universalPools) {
+            if (!pool.texture || pool.failed) continue;
+            if (!g_universalReplicateCS || !g_universalLiveMipSRVs[mip] ||
+                !pool.mipUAVs[mip] || !pool.tintConstants) return false;
+        }
         // Commit only after all views are available; restore bindings while old views remain identifiable.
         RepairLiveBindings(true);
-        for (auto& entry:pending) *entry.target=std::move(entry.replacement);
+        // Unselected pool mips may be stale or uninitialized. Fill before exposing them,
+        // including settings changes on callbacks that skip capture.
+        for (auto& pool:g_universalPools) {
+            if (pool.texture && !pool.failed) UniversalReplicatePool(pool, mip);
+        }
+        for (auto& entry:pending) {
+            (*entry.cache)[mip]=entry.replacement;
+            *entry.target=std::move(entry.replacement);
+        }
         g_materialMip=mip;
+        RebuildMaterialViewLookup();
         RepairLiveBindings(false);
         return true;
     }
@@ -4788,16 +4931,21 @@ void ResetTintAnalysis()
 			d.BindFlags=D3D11_BIND_SHADER_RESOURCE|D3D11_BIND_RENDER_TARGET;
 			d.MiscFlags=D3D11_RESOURCE_MISC_TEXTURECUBE|D3D11_RESOURCE_MISC_GENERATE_MIPS;
 			g_liveTexture.Reset(); g_liveSRV.Reset(); g_liveMipSource.Reset();
+            for (auto& view:g_liveMaterialViews) view.Reset();
+            RebuildMaterialViewLookup();
 			if (FAILED(device->CreateTexture2D(&d,nullptr,g_liveTexture.GetAddressOf()))) return false;
+			TagReflectionReplacement(g_liveTexture.Get());
 			D3D11_SHADER_RESOURCE_VIEW_DESC v{}; v.Format=d.Format;
 			v.ViewDimension=D3D11_SRV_DIMENSION_TEXTURECUBE; v.TextureCube.MipLevels=kCubeMipCount;
 			if (FAILED(device->CreateShaderResourceView(g_liveTexture.Get(),&v,g_liveMipSource.GetAddressOf()))) return false;
 			// Expose the selected material mip; internal mip views stay complete.
 			v.TextureCube.MostDetailedMip=g_materialMip; v.TextureCube.MipLevels=1;
 			if (FAILED(device->CreateShaderResourceView(g_liveTexture.Get(),&v,g_liveSRV.GetAddressOf()))) return false;
+            RebuildMaterialViewLookup();
 		}
 		RepairLiveBindings(true);
 		const bool inferred=DispatchInference(g_liveContext,g_colorCubeSRV);
+        if(inferred) PerfStage(2);
 		if (!inferred) { RepairLiveBindings(false); return false; }
 		for (UINT face=0;face<6;++face) g_liveContext->CopySubresourceRegion(g_liveTexture.Get(),face*kCubeMipCount,
 			0,0,0,g_inferredTexture,face,nullptr);
@@ -4872,6 +5020,15 @@ void ResetTintAnalysis()
 	}
 
 
+    bool PerfRunAccumulation(bool reset) {
+        PerfBeginCapture();
+        const bool ok=DispatchAccumulationFrame(reset);
+        if(ok) PerfStage(1); else PerfEndCapture();
+        return ok;
+    }
+    bool PerfRunPublication() {
+        const bool ok=PublishLiveCube(); PerfEndCapture(); return ok;
+    }
 	void ManualCaptureTick()
 	{
 
@@ -4892,7 +5049,8 @@ void ResetTintAnalysis()
 		}
 		// All changes run on the existing render callback.
 		const auto now=GetTickCount64();
-		ReportRainDraws(now);
+		if(g_diagnosticsEnabled) ReportRainDraws(now);
+        if(g_diagnosticsEnabled && g_liveEnabled) PerfTick(now);
 		if (g_liveEnabled && now>=g_nextRainAudit) {
 			g_rainAuditDue=true;
 			g_nextRainAudit=now+1000;
@@ -4901,7 +5059,18 @@ void ResetTintAnalysis()
 			g_nextSettingsPoll=now+500;
 			LoadSettings();
 		}
-		if (!g_liveEnabled && !g_autoStartPending) return;
+		if (!g_requestedEnabled) {
+            if (g_liveEnabled || g_autoStartPending) {
+                RepairLiveBindings(true);
+                g_liveEnabled=false; g_liveReady=false; g_autoStartPending=false;
+                g_accumulating.store(false); g_accumulatedFrames.store(0);
+                g_enginePerFrameMapped=nullptr; g_latestMappedValid=false; g_worldFrameValid=false;
+                g_haveHistoryOrigin=false; g_rainAuditDue=false;
+                UniversalReset(); ResetRainReporting();
+            }
+            return;
+        }
+        if (!g_liveEnabled && !g_autoStartPending) return;
         const UINT requestedMip=MaterialMipForMode(g_requestedRoughness);
         static ULONGLONG nextMipAttempt=0;
         static int reportedFailedMode=-1;
@@ -4927,7 +5096,7 @@ void ResetTintAnalysis()
 
 
 		const auto callback = g_callbackCount.fetch_add(1, std::memory_order_relaxed) + 1;
-		if (g_runtimeProfile.family == RuntimeFamily::ae &&
+		if (g_diagnosticsEnabled && g_runtimeProfile.family == RuntimeFamily::ae &&
 			(callback == 1 || callback == 120 || callback == 600)) {
 			Log("AE240 STATUS: callback=" + std::to_string(callback) +
 				" drawVisits=" + std::to_string(g_aeDrawVisits) +
@@ -4990,10 +5159,10 @@ void ResetTintAnalysis()
 				const bool captureTurn=!g_liveEnabled || frame==0 || callback%3u==0u;
 				if (!captureTurn) {
 					// Settings and status checks still run on skipped capture frames.
-				} else if (DispatchAccumulationFrame(frame == 0)) {
+				} else if (PerfRunAccumulation(frame == 0)) {
 					g_accumulatedFrames.fetch_add(1);
 					if (g_liveEnabled) {
-						if (!PublishLiveCube()) {
+						if (!PerfRunPublication()) {
 							g_liveEnabled=false; g_liveReady=false; g_accumulating.store(false); RepairLiveBindings(true);
 							Log("FAIL: live publish failed; restored static. Switch Dynamic reflections off/on in MCM to retry.");
 						}
@@ -5081,7 +5250,7 @@ F4SE_PLUGIN_LOAD(
 			<< " " << utc.wHour << ":" << utc.wMinute << ":" << utc.wSecond << " ===\n";
 		if (rotationError) log << "LOG: rotation failed; preserved current by appending; Windows error=" << rotationError << "\n";
 
-		log << "DynamicCubemapF4 1.3.1\n"
+		log << "DynamicCubemapF4 1.4\n"
 			<< "Runtime family: " << g_runtimeProfile.name << "\n"
 			<< "Runtime version: " << g_runtimeVersion << "\n"
 			<< "Support: send DynamicCubemapF4.log and DynamicCubemapF4.previous.log from Data/F4SE/Plugins.\n";
@@ -5097,7 +5266,7 @@ F4SE_PLUGIN_LOAD(
 		return false;
 	}
 	LoadSettings();
-	Log("SETTINGS: enabled="+std::to_string(g_requestedEnabled)+
+	Log("SETTINGS: enabled="+std::to_string(g_requestedEnabled.load())+
 		" reprojection="+std::to_string(g_requestedReprojection)+
 		" softness="+std::to_string(g_requestedRoughness)+
         " requestedMaterialMip="+std::to_string(MaterialMipForMode(g_requestedRoughness))+" cubeSize=128");
@@ -5135,7 +5304,7 @@ F4SE_PLUGIN_LOAD(
 // The load entry point independently rejects unknown runtimes before library init.
 F4SE_PLUGIN_VERSION = []() noexcept {
     F4SE::PluginVersionData v{};
-    v.PluginVersion({1, 3, 1, 0});
+    v.PluginVersion({1, 4, 0, 0});
     v.PluginName("DynamicCubemapF4");
     v.AuthorName("103Sakamoto");
     v.UsesAddressLibraryAE(true);
@@ -5156,7 +5325,7 @@ F4SE_PLUGIN_QUERY(const F4SE::QueryInterface* f4se, F4SE::PluginInfo* info)
     if (!f4se || !info) return false;
     info->infoVersion = F4SE::PluginInfo::kVersion;
     info->name = "DynamicCubemapF4";
-    info->version = REL::Version{1,3,1,0}.pack();
+    info->version = REL::Version{1,4,0,0}.pack();
     return !f4se->IsEditor() &&
         (f4se->RuntimeVersion() == REL::Version{1,10,163,0} ||
          f4se->RuntimeVersion() == REL::Version{1,10,984,0} ||

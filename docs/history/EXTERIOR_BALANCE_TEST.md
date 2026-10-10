@@ -1,0 +1,11 @@
+# ExteriorBalance01 ¡ª October 9, 2026
+
+Based on GlassInterop01 Perf01. Recognized exterior cubes bypass authored hue/desaturation as before, but no longer bypass the authored luminance scale. Brightness is clamp(sqrt(clamp(Y,0,1)),0.15,1) for usable exterior luminance, independently of hue consistency. Ordinary material policies are retained. The supplied 1.3 log's Y=0.072524 yields approximately 0.269302, rather than 1.0.
+
+Array entries and analyzed standalone exterior copies use the same scale. Standalone exterior copies receive a styled pool; if pool capacity prevents allocation, the authored binding remains instead of using an unscaled shared live cube. Existing reference identity, ambiguous-candidate guards, recovery, Glass ownership and Perf01 optimizations remain. Capture, inference and replication shader strings are unchanged. The current fixed-mip softness behavior remains; this does not restore 1.3's roughness filtering.
+
+Install this entire test archive as a separate mod, with earlier DCF4 test packages disabled, then restart the game. Enable Dynamic reflections and use the same softness/reprojection choices as your comparison. There is no global exposure reduction, compression curve, or diagnostic readback loop. Saved iExposureReduction and bBrightnessDiagnostics settings from Exposure01 are ignored. Glass compatibility is included.
+
+Check the affected weapon at noon and at night, sky color, nearby non-exterior materials and Glass, MCM off/on, all softness choices, and save/cell transitions. Send DynamicCubemapF4.log. The header identifies ExteriorBalance01. EXTERIOR_EXCLUDED now means excluded from authored color treatment only; its scale should reflect the original cube's luminance, not necessarily a universal 0.269302.
+
+Validation: Windows MSVC x64 releasedbg build passed. Extracted-production policy tests passed for duplicate exterior candidates, ordinary tint/neutral materials, conservative original retention, and invalid luminance. Updated Glass binding tests passed including exterior pool exhaustion and pending publication; Perf01 dispatch/rain tests passed. In-game appearance is not yet verified. This is a targeted test fix, not a confirmed final release.

@@ -1,6 +1,6 @@
 set_xmakever("3.0.0")
 set_project("DynamicCubemapF4")
-set_version("1.3.1")
+set_version("1.4.0")
 set_languages("c++23")
 set_arch("x64")
 add_rules("mode.debug", "mode.releasedbg")

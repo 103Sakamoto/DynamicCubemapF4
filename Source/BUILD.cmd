@@ -13,7 +13,7 @@ if errorlevel 1 (
     exit /b 1
 )
 
-set "DCF4_DETOURS=E:\Coding\F4\vcpkg\installed\x64-windows-static-md"
+if not defined DCF4_DETOURS set "DCF4_DETOURS=E:\Coding\F4\vcpkg\installed\x64-windows-static-md"
 if not exist "%DCF4_DETOURS%\include\detours\detours.h" (
     echo ERROR: Missing %DCF4_DETOURS%\include\detours\detours.h
     exit /b 1
@@ -30,6 +30,6 @@ call xmake build -r DynamicCubemapF4
 if errorlevel 1 exit /b %errorlevel%
 
 echo.
-echo DynamicCubemapF4 1.3.1 build completed. DLL:
+echo DynamicCubemapF4 1.4.0 build completed. DLL:
 echo %CD%\build\windows\x64\releasedbg\DynamicCubemapF4.dll
 exit /b 0

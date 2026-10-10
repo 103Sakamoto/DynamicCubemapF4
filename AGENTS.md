@@ -1,6 +1,6 @@
 # Project continuity
 
-Use this DynamicCubemapF4 1.3.1 release as the user-approved baseline for future development and debugging unless explicitly superseded. Read BASELINE.md before editing. Preserve verified rendering behavior for unrelated changes.
+Use release 1.4 as the user-selected baseline. Preserve its Realistic Reflections ownership protocol. Read BASELINE.md before editing. Preserve verified rendering behavior for unrelated changes.
 
 Windows workspace root: E:\Coding\F4. Detours: E:\Coding\F4\vcpkg\installed\x64-windows-static-md. BUILD.cmd is self-locating and is run from a Visual Studio x64 Developer Command Prompt. Never give PowerShell backtick continuations for cmd.exe.
 

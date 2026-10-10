@@ -6,7 +6,7 @@ Copyright (C) 2026 103Sakamoto. The existing project identifies its license as
 GPL-3.0-only. The full license is included as LICENSE.txt. Modified Fallout 4
 implementation and release changes are documented in CHANGELOG.md. This package retains the existing license choice and author credit.
 
-## Skyrim Community Shaders â€” Doodlum and contributors
+## Skyrim Community Shaders ¡ª Doodlum and contributors
 
 https://github.com/doodlum/skyrim-community-shaders
 
