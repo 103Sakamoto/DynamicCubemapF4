@@ -1,6 +1,7 @@
 // The runner extracts the actual production routines into production_interop.inc.
 // These mocks check CPU binding/ownership behavior, not the D3D driver or F4SE.
 #include "ReflectionInterop.h"
+#include "TintReports.h"
 #include <array>
 #include <atomic>
 #include <climits>
@@ -23,14 +24,16 @@ struct ID3D11DeviceContext {
         }
     }
 };
+unsigned nativeCalls=0;
+ID3D11ShaderResourceView* const* lastNativeArray=nullptr;
 void BindNative(ID3D11DeviceContext* context,UINT start,UINT count,
                 ID3D11ShaderResourceView* const* views) {
+    ++nativeCalls;lastNativeArray=views;
     for(UINT i=0;i<count;++i) context->slots[start+i]=views ? views[i] : nullptr;
 }
 auto g_originalPSResources=&BindNative;
 ID3D11DeviceContext* g_liveContext=nullptr;
 ComPtr<ID3D11ShaderResourceView> g_liveSRV;
-std::array<ComPtr<ID3D11ShaderResourceView>,8> g_liveMaterialViews;
 bool g_liveEnabled=true, g_liveReady=true;
 bool g_liveCubemapSlots[128]{};
 std::uint32_t g_liveCubemapSlotCount=0;
@@ -41,7 +44,7 @@ bool UniversalFloatSampleFormat(int format) { return format==1; }
 void SetLiveCubemapSlot(UINT slot,bool bound);
 ID3D11ShaderResourceView* namedExterior=nullptr;
 bool IsExteriorFallbackView(ID3D11ShaderResourceView* view) { return view==namedExterior; }
-bool g_diagnosticsEnabled=true; struct PerfHookScope {}; unsigned lookupCalls=0;
+std::atomic_bool g_diagnosticsEnabled{true}; struct PerfHookScope { void BeginDriver(){} }; unsigned lookupCalls=0;
 #include "production_interop.inc"
 
 int main() {
@@ -112,6 +115,11 @@ int main() {
     bind(&glass); assert(!g_universalSlots[8]); bind(nullptr);
     bind(&authored); bind(&flat); assert(!g_universalSlots[8]);
     assert(current()==&flat);
+    // A warmed ordinary texture needs no replacement lookup or COM classification.
+    const auto flatLookups=lookupCalls;const auto flatReads=flat.privateReads;
+    for(unsigned i=0;i<10000;++i)bind(&flat);
+    assert(lookupCalls==flatLookups && flat.privateReads==flatReads && current()==&flat);
+    assert(!g_universalSlots[8] && g_liveCubemapSlotCount==0);
     // Tagged non-cube peer views must also remain outside the negative cache.
     ID3D11ShaderResourceView peerFlat(&glassResource);
     peerFlat.desc.ViewDimension=D3D11_SRV_DIMENSION_TEXTURE2D;
@@ -125,27 +133,6 @@ int main() {
     bind(&glass); assert(current()==&glass); bind(&authored);
     g_liveEnabled=true; bind(&authored); assert(current()==&live);
 
-    // Recreating the material SRV preserves the tag via the same resource.
-    ID3D11ShaderResourceView softer(&liveResource);
-    assert(IsPeerReplacement(&softer));
-    UniversalRepair(true); g_liveMaterialViews[2]=g_liveSRV; g_liveSRV=&softer; RebuildMaterialViewLookup(); UniversalRepair(false);
-    assert(current()==&softer);
-    // A renderer can retain the old material view across a softness change.
-    bind(&live); assert(current()==&softer);
-    assert(g_universalSlots[8].Get()==&authored);
-    g_liveMaterialViews[4]=&softer;
-    for(int i=0;i<12;++i) {
-        g_liveSRV=(i%2) ? &softer : &live; RebuildMaterialViewLookup();
-        const auto count=g_universalViews.size();
-        bind((i%2) ? &live : &softer);
-        assert(current()==g_liveSRV.Get() && g_universalViews.size()==count);
-        assert(g_universalSlots[8].Get()==&authored);
-    }
-    ID3D11ShaderResourceView* retained=&live;
-    BindNative(&context,8,1,&retained); // State restoration outside our hook.
-    UniversalRepair(false); assert(current()==&softer);
-    bind(&glass); bind(&softer); UniversalRepair(true); assert(current()==&authored);
-
     // Ready standalone pools and arrays have the same restoration behavior.
     ID3D11ShaderResourceView pooled(&liveResource),array(&authoredResource);
     UniversalPool pool; pool.ready=true; pool.standalone=true; pool.view=&pooled;
@@ -157,12 +144,7 @@ int main() {
     arrayPool.view=&pooled; arrayPool.ready=true; arrayPool.exteriorMatchState=0; RebuildMaterialViewLookup();
     bind(&array); assert(current()==&pooled);
     bind(&glass); bind(&pooled); UniversalRepair(true); assert(current()==&array);
-    ID3D11ShaderResourceView oldArray(&liveResource);
-    arrayPool.materialViews[2]=&oldArray; RebuildMaterialViewLookup();
-    bind(&oldArray); assert(current()==&pooled);
-    assert(g_universalSlots[8].Get()==&array);
-    bind(&glass); bind(&oldArray); UniversalRepair(true); assert(current()==&array);
-    arrayPool.materialViews[2].Reset(); RebuildMaterialViewLookup(); assert(!CurrentMaterialView(&oldArray));
+
 
     // Tag failure is reported once without disabling the working renderer.
     // Exterior cubes must not fall back to the unscaled shared live view when
@@ -177,6 +159,26 @@ int main() {
     bind(&glass); assert(current()==&glass);
     bind(&pooled); UniversalRepair(true); assert(current()==&authored);
 
+    // Preserve every native call and each valid slot without initializing
+    // unused scratch storage. Exercise the maximum-sized mixed binding.
+    std::array<ID3D11ShaderResourceView*,128> mixed{};
+    mixed.fill(&flat);
+    auto calls=nativeCalls;
+    Hook_PSResources(&context,0,128,mixed.data());
+    assert(nativeCalls==calls+1 && lastNativeArray==mixed.data());
+    for(auto& v:context.slots)assert(v.Get()==&flat);
+    mixed[5]=&authored;mixed[120]=&glass;
+    calls=nativeCalls;Hook_PSResources(&context,0,128,mixed.data());
+    assert(nativeCalls==calls+1 && lastNativeArray!=mixed.data());
+    for(unsigned i=0;i<128;++i)assert(context.slots[i].Get()==(i==5?&pooled:(i==120?&glass:&flat)));
+    assert(g_universalSlots[5].Get()==&authored && g_liveCubemapSlotCount==1);
+    calls=nativeCalls;Hook_PSResources(&context,0,128,nullptr);
+    assert(nativeCalls==calls+1 && lastNativeArray==nullptr && g_liveCubemapSlotCount==0);
+    for(auto& v:context.slots)assert(!v);
+    calls=nativeCalls;Hook_PSResources(&context,0,0,nullptr);
+    assert(nativeCalls==calls+1 && lastNativeArray==nullptr);
+    for(auto& v:g_universalSlots)v.Reset();
+
         // Fill beyond the unchanged 1024-view budget; measure one eviction and a subsequent hit.
     bind(nullptr); ResetNonCubeCache();
     g_cacheHits=g_cacheMisses=g_cacheInserts=g_cacheEvictions=0;
@@ -187,6 +189,7 @@ int main() {
         bind(view.get()); ordinaryViews.push_back(std::move(view));
     }
     assert(g_universalNonCubeViews.size()==1024 && g_cacheEvictions==1 && g_cacheInserts==1025 && g_cacheMisses==1025);
+    assert(g_cacheClockMax==1024 && g_cacheClockSteps==1024);
     bind(ordinaryViews.back().get()); assert(g_cacheHits==1 && g_cacheInserts==1025);
     g_diagnosticsEnabled=false; bind(ordinaryViews.back().get()); assert(g_cacheHits==1); g_diagnosticsEnabled=true;
         // After the first full sweep, view 1 is the next victim. Touch it so clock skips it.
@@ -206,9 +209,8 @@ int main() {
     assert(logs.size()==before+1 && !IsPeerReplacement(&failed) && g_liveEnabled);
     assert(glass.refs==glassRefs);
     bind(nullptr); g_liveSRV.Reset(); g_universalViews.clear(); ResetNonCubeCache();
-    for(auto& cached:g_liveMaterialViews) cached.Reset();
     g_universalPools.clear(); RebuildMaterialViewLookup(); assert(g_materialViewLookup.empty()); pool.view.Reset();
     for(auto& slot:g_universalSlots)slot.Reset();
-    assert(authored.refs==1 && glass.refs==1 && glassViaResource.refs==1 && softer.refs==1);
-    std::cout << "PASS: ownership, reference balance, repair, toggle, mip and pool binding sequences\n";
+    assert(authored.refs==1 && glass.refs==1 && glassViaResource.refs==1);
+    std::cout << "PASS: ownership, reference balance, repair, toggle and pool binding sequences\n";
 }

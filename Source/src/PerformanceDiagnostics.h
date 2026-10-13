@@ -17,6 +17,7 @@ struct PerfQuerySlot {
 };
 std::array<PerfQuerySlot,4> g_perfQueries;
 PerfStats g_perfCPU[3],g_perfGPU[3],g_perfHook;
+PerfStats g_perfHookProcessing,g_perfHookDriver; // BINDCPU
 std::uint64_t g_perfHookCalls=0,g_perfCaptureCalls=0;
 unsigned g_perfSkipped=0,g_perfInvalid=0;
 int g_perfActive=-1; unsigned g_perfStage=0;
@@ -25,9 +26,18 @@ ULONGLONG g_perfNextSample=0,g_perfNextPoll=0,g_perfLastReport=0;
 bool g_perfQueryFailed=false;
 std::size_t g_perfPeakPools=0,g_perfPeakViews=0;
 struct PerfHookScope {
-    LONGLONG start=0;
+    LONGLONG start=0,driver=0;
     PerfHookScope() { if (g_diagnosticsEnabled && (++g_perfHookCalls & 4095u)==0) start=PerfClock(); }
-    ~PerfHookScope() { if(start) g_perfHook.Add(PerfMilliseconds(PerfClock()-start)); }
+    void BeginDriver() { if(start)driver=PerfClock(); }
+    ~PerfHookScope() {
+        if(!start)return;
+        const auto end=PerfClock();
+        g_perfHook.Add(PerfMilliseconds(end-start));
+        if(driver) {
+            g_perfHookProcessing.Add(PerfMilliseconds(driver-start));
+            g_perfHookDriver.Add(PerfMilliseconds(end-driver));
+        }
+    }
 };
 void PerfBeginCapture() {
     if(!g_diagnosticsEnabled || !g_liveEnabled) return;
@@ -111,23 +121,35 @@ void PerfTick(ULONGLONG now) {
     Log("PERF TIMING: mean/max_ms CPU_capture="+g_perfCPU[0].Text()+" CPU_infer="+g_perfCPU[1].Text()+
         " CPU_publish="+g_perfCPU[2].Text()+" GPU_capture="+g_perfGPU[0].Text()+" GPU_infer="+g_perfGPU[1].Text()+
         " GPU_publish="+g_perfGPU[2].Text()+" CPU_bind_with_driver="+g_perfHook.Text()+
+        " CPU_bind_processing="+g_perfHookProcessing.Text()+" CPU_bind_driver="+g_perfHookDriver.Text()+ // BINDCPU
         " hookSamples="+std::to_string(g_perfHook.n)+" gpuSamples="+std::to_string(g_perfGPU[0].n)+
         " pending="+std::to_string(pending)+" dropped="+std::to_string(g_perfSkipped)+" invalid="+std::to_string(g_perfInvalid));
     for(auto& v:g_perfCPU) v={}; for(auto& v:g_perfGPU) v={}; g_perfHook={};
+    g_perfHookProcessing={};g_perfHookDriver={}; // BINDCPU
     g_perfHookCalls=0; g_perfCaptureCalls=0; g_perfSkipped=0; g_perfInvalid=0; g_perfLastReport=now;
 }
 
 
 void SetDiagnosticsEnabled(bool enabled) {
     if(g_diagnosticsEnabled==enabled) return;
+    // TINTTRACE BEGIN
+    if(g_diagnosticsEnabled) {
+        const auto tintSummary=g_tintTraceSummary.Report(GetTickCount64()-g_logStart,true);
+        if(!tintSummary.empty())Log(tintSummary);
+    }
+    g_tintTraceSummary={};
+    // TINTTRACE END
     // Runs between updates on the render thread; never wait for pending queries.
     PerfEndCapture();
+    if(!enabled) DCFDiag::Disable();
     for(auto& q:g_perfQueries) q={};
     for(auto& s:g_perfCPU) s={}; for(auto& s:g_perfGPU) s={}; g_perfHook={};
+    g_perfHookProcessing={};g_perfHookDriver={}; // BINDCPU
     g_perfHookCalls=0; g_perfCaptureCalls=0; g_perfSkipped=0; g_perfInvalid=0;
     g_perfActive=-1; g_perfStage=0; g_perfNextSample=0; g_perfNextPoll=0; g_perfLastReport=0;
     g_perfQueryFailed=false; g_perfPeakPools=0; g_perfPeakViews=0;
     g_cacheHits=g_cacheMisses=g_cacheInserts=g_cacheEvictions=0;
+    g_cacheClockSteps=0;g_cacheClockMax=0; // BINDCPU
     g_diagnosticsEnabled=enabled;
     if(enabled) Log("DIAGNOSTICS: enabled; timing and cache counters start fresh.");
 }

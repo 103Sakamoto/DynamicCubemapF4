@@ -6,6 +6,8 @@ import tempfile
 
 root = Path(__file__).resolve().parents[1]
 source = (root / "Source/src/Main.cpp").read_text()
+from source_tools import without_diagnostic_instrumentation
+source = without_diagnostic_instrumentation(source)
 
 def function(signature):
     start = source.index(signature)
@@ -19,7 +21,8 @@ def function(signature):
 with tempfile.TemporaryDirectory(prefix="dcf4-perf-") as directory:
     temp = Path(directory)
     (temp / "production_performance.inc").write_text(
-        function("void UniversalReplicatePool(") +
+        function("struct UniversalReplicationScope") + ";\n" +
+        function("UINT PreparePoolUpdates(") + function("void UniversalDispatchPool(") +
         "template<class DrawCall>\n" + function("void DrawWithRainNeutralB12("))
     executable = temp / ("performance_test.exe" if os.name == "nt" else "performance_test")
     subprocess.run([os.environ.get("CXX", "g++"), "-std=c++20", "-Wall", "-Wextra",

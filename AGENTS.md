@@ -1,7 +1,9 @@
 # Project continuity
 
-Use release 1.4 as the user-selected baseline. Preserve its Realistic Reflections ownership protocol. Read BASELINE.md before editing. Preserve verified rendering behavior for unrelated changes.
+Use public 1.5 as the accepted baseline. Read BASELINE.md before editing. Preserve the verified shaders, ownership protocol, source/cache safety, full mip chains, lighting and scheduling unless the user explicitly requests a change.
 
-Windows workspace root: E:\Coding\F4. Detours: E:\Coding\F4\vcpkg\installed\x64-windows-static-md. BUILD.cmd is self-locating and is run from a Visual Studio x64 Developer Command Prompt. Never give PowerShell backtick continuations for cmd.exe.
+Plugin code lives in Source/src. Tests are standalone mocks/WARP/inspection programs and must never be compiled into the plugin. Keep bundled dependency sources, copyright notices and licenses intact.
 
-Plugin code lives in Source/src/Main.cpp; Tests contains standalone mocks with their own main functions and must not be compiled into the plugin. Keep external dependency sources and licenses intact. Tests do not establish Windows compilation or in-game correctness. Put release history in documentation, not rendering comments or log banners.
+BUILD.cmd is self-locating and runs from a Visual Studio x64 Developer Command Prompt. Use DCF4_DETOURS and DCF4_PYTHON for external installations. Never give PowerShell backtick continuations for cmd.exe.
+
+Use RUN_TESTS.cmd for current portable regression checks. Optional binary audits require user-provided paths; never redistribute game or third-party executable bytes. Tests do not establish in-game correctness or GPU benchmark results. Put development history in documentation, not rendering comments or startup banners. Do not overwrite existing release tags.

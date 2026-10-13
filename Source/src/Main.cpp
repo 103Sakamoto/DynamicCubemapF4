@@ -16,13 +16,20 @@
 #include "RE/B/BSResourceNiBinaryStream.h"
 
 #include <Windows.h>
+// RUNTIMECOMPAT BEGIN
+#include <bcrypt.h>
+// RUNTIMECOMPAT END
 #include <d3d11.h>
-#include <d3dcompiler.h>
+#include <d3d11_1.h>
+#include "../generated/EmbeddedShaders.h"
 #include <detours/detours.h>
 #include <DirectXMath.h>
 #include <wrl/client.h>
 
 #include "ReflectionInterop.h"
+#include "DiagnosticsOverlay.h"
+#include "TintAnalysisTrace.h" // TINTTRACE
+#include "TintReports.h" // TINTBATCH
 
 #include <algorithm>
 #include <array>
@@ -43,7 +50,6 @@
 #include <mutex>
 #include <utility>
 
-#pragma comment(lib, "d3dcompiler.lib")
 #pragma comment(lib, "user32.lib")
 
 #ifdef near
@@ -131,12 +137,8 @@ namespace
     std::atomic_bool g_diagnosticsEnabled{false};
     void SetDiagnosticsEnabled(bool enabled);
 	bool g_autoStartPending=false;
-	bool g_reprojectEnabled=true;
-	bool g_requestedReprojection=true;
-    int g_requestedRoughness=2;
-    UINT g_materialMip=2;
-    constexpr UINT MaterialMipForMode(int mode) { return static_cast<UINT>(mode); }
-    static_assert(MaterialMipForMode(0)==0 && MaterialMipForMode(1)==1 && MaterialMipForMode(2)==2 && MaterialMipForMode(3)==3 && MaterialMipForMode(4)==4);
+	bool g_reprojectEnabled=false;
+	bool g_requestedReprojection=false;
 	ULONGLONG g_nextSettingsPoll=0;
 	constexpr float g_reprojectMinMove=2.0f;
 	constexpr float g_teleportResetDistance=2048.0f;
@@ -164,7 +166,6 @@ namespace
 	bool g_loggedRainDrawOverride = false;
 	Microsoft::WRL::ComPtr<ID3D11Texture2D> g_liveTexture;
 	Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> g_liveSRV;
-    std::array<Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>,8> g_liveMaterialViews;
 	Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> g_liveMipSource;
 	std::atomic_uint32_t g_callbackCount{ 0 };
 	std::atomic_uint32_t g_accumulatedFrames{ 0 };
@@ -194,15 +195,15 @@ namespace
 
 	ID3D11Texture2D* g_defaultCubeTexture = nullptr;
 	ID3D11ShaderResourceView* g_defaultCubeSRV = nullptr;
-	Microsoft::WRL::ComPtr<ID3D11Texture2D> g_interiorDarkCubeTexture;
-	Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> g_interiorDarkCubeSRV;
 
 	ID3D11ComputeShader* g_inferLiveCS = nullptr;
-	ID3D11ComputeShader* g_inferLiveBinaryCS = nullptr;
-	ID3D11ComputeShader* g_inferLiveBlendCS[7]{};
-	bool g_fallbackLockStarted = false;
-	std::uint32_t g_fallbackLockStartFrame = 0;
-	constexpr std::uint32_t g_fallbackLockFrames = 60;
+// SKYCOLOR BEGIN
+Microsoft::WRL::ComPtr<ID3D11Texture2D> g_skyColorTexture;
+Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> g_skyColorUAV;
+Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> g_skyColorSRV;
+Microsoft::WRL::ComPtr<ID3D11ComputeShader> g_skyColorCS;
+// SKYCOLOR END
+	bool g_captureShaderSeparateSky=false;
 
 	ID3D11Texture2D* g_coverageTexture = nullptr;
 	ID3D11UnorderedAccessView* g_coverageUAV = nullptr;
@@ -295,17 +296,17 @@ namespace
 	// This is the non-REFLECTIONS variant.
 	const char* kInferShader = R"(
 TextureCube<float4> EnvCaptureTexture : register(t0);
+#if defined(SEPARATE_SKY_HISTORY)
 TextureCube<float4> SkyHistoryTexture : register(t1);
+#endif
 TextureCube<float4> DefaultCubemap : register(t2);
+// SKYCOLOR BEGIN
+TextureCube<float4> FallbackSkyColor : register(t3);
+// SKYCOLOR END
 
 RWTexture2DArray<float4> EnvInferredTexture : register(u0);
 
 SamplerState LinearSampler : register(s0);
-
-float3 LinearToIrradiance(float3 color)
-{
-	return pow(abs(color), 1.0 / 1.6);
-}
 
 float3 GetSamplingVector(uint3 threadID)
 {
@@ -347,73 +348,64 @@ void main(uint3 threadID : SV_DispatchThreadID)
 			uv,
 			0);
 
-	// Only local mips may fill small reprojection holes. Broad face averages
-	// must not turn an unobserved direction into apparently valid coverage.
-	float directionalConfidence = color.w;
-
-	float mipLevel = 0.0;
-
-	const float growth = 1.5;
-	float brightness = growth;
-
-	while (color.w < 1.0 && mipLevel < 2.0)
-	{
-		mipLevel++;
-
-		float4 tempColor = EnvCaptureTexture.SampleLevel(
-			LinearSampler, uv, mipLevel);
-		directionalConfidence = max(directionalConfidence, tempColor.w);
-
-		tempColor *= brightness;
-		brightness *= growth;
-
-		if (color.w + tempColor.w > 1.0)
-		{
-			mipLevel -= color.w;
-
-			float alphaDifference =
-				1.0 - color.w;
-
-			tempColor *=
-				alphaDifference /
-				max(tempColor.w, 0.0001);
-
-			color += tempColor;
-			break;
-		}
-
-		color += tempColor;
-	}
-
-	// History RGB is confidence-weighted. Recover radiance before compositing;
-	// local inference can end before its accumulated alpha reaches one.
-	color.rgb /= max(color.w, 0.0001);
-	// Fallback is display-only: never write it into capture/reprojection history.
-	// Smooth weak coverage boundaries; fully covered directions have zero
-	// fallback contribution after the existing startup transition completes.
-	#ifndef FALLBACK_LOCK_WEIGHT
-	#define FALLBACK_LOCK_WEIGHT 0.0
-	#endif
-	float fadeWeight = saturate(directionalConfidence);
-	float validWeight = smoothstep(0.02, 0.25, directionalConfidence);
-	float liveWeight = lerp(fadeWeight, validWeight, FALLBACK_LOCK_WEIGHT);
-	float3 fallback =
-		DefaultCubemap.SampleLevel(LinearSampler, uv, 0.0).rgb;
-	// Sky is stored independently from finite geometry. Use it only as a
-	// background: full-confidence geometry always wins. Alpha marks observed
-	// sky directions; never invent sky in an unobserved direction.
-	float4 sky = SkyHistoryTexture.SampleLevel(LinearSampler, uv, 0.0);
-	float skyWeight = saturate(sky.a);
-	float3 skyRadiance = sky.rgb / max(sky.a, 0.0001);
-	fallback = lerp(fallback, skyRadiance, skyWeight);
-	color.rgb = lerp(fallback, color.rgb, liveWeight);
-
-#if !defined(LIVE_LINEAR_OUTPUT)
-	color.rgb =
-		LinearToIrradiance(
-			color.rgb);
+#if defined(SEPARATE_SKY_HISTORY)
+    // Reprojection preserves sky independently of finite geometry positions.
+    float4 sky = SkyHistoryTexture.SampleLevel(LinearSampler, uv, 0.0);
+    color += sky * (1.0 - saturate(color.a));
 #endif
 
+    // CS non-REFLECTIONS inference, pinned at b81bf11cf126f41aaa53d7318b61293677d9c0cc.
+	float mipLevel = 0.0;
+
+	float k = 1.5;
+	float brightness = k;
+
+	while (color.w < 1.0 && mipLevel <= 9) {
+		mipLevel++;
+
+		float4 tempColor = 0.0;
+		if (mipLevel < 9) {
+			tempColor = EnvCaptureTexture.SampleLevel(LinearSampler, uv, mipLevel);
+		} else {
+			tempColor += EnvCaptureTexture.SampleLevel(LinearSampler, float3(-1.0, 0.0, 0.0), 10);
+			tempColor += EnvCaptureTexture.SampleLevel(LinearSampler, float3(1.0, 0.0, 0.0), 10);
+			tempColor += EnvCaptureTexture.SampleLevel(LinearSampler, float3(0.0, -1.0, 0.0), 10);
+			tempColor += EnvCaptureTexture.SampleLevel(LinearSampler, float3(0.0, 1.0, 0.0), 10);
+			tempColor += EnvCaptureTexture.SampleLevel(LinearSampler, float3(0.0, 0.0, -1.0), 10);
+			tempColor += EnvCaptureTexture.SampleLevel(LinearSampler, float3(0.0, 0.0, 1.0), 10);
+		}
+
+		tempColor *= brightness;
+		brightness *= k;
+
+		if ((color.w + tempColor.w) > 1.0) {
+			float alphaDiff = 1.0 - color.w;
+			tempColor.xyzw *= alphaDiff / tempColor.w;
+			color.xyzw += tempColor;
+			mipLevel -= color.w; // SKYCOLOR: CS REFLECTIONS blend weight
+			break;
+		} else {
+			color.xyzw += tempColor;
+		}
+	}
+
+    // History RGB is confidence-weighted. Recover captured radiance when the
+    // inference loop ends with incomplete coverage; this is not exposure gain.
+    // Static fallback is used only when no usable captured sample exists.
+    if (color.a <= 0.0001)
+        color.rgb = DefaultCubemap.SampleLevel(LinearSampler, uv, 0.0).rgb;
+    else
+        color.rgb /= max(color.a, 0.0001);
+
+// SKYCOLOR BEGIN
+    // CS REFLECTIONS blend, with observed sky radiance replacing FO4's empty native cube.
+    // Coverage and captured RGB remain authoritative in observed directions.
+    if (mipLevel > 0.0) {
+        float4 skyColor = FallbackSkyColor.SampleLevel(LinearSampler, uv, 0.0);
+        if (skyColor.a > 0.0 && all(isfinite(skyColor)) && all(skyColor.rgb >= 0.0))
+            color.rgb = lerp(color.rgb, skyColor.rgb, saturate(mipLevel / 8.0));
+    }
+// SKYCOLOR END
 	EnvInferredTexture[threadID] =
 		max(0.0, color);
 }
@@ -426,7 +418,9 @@ RWTexture2DArray<float4> DynamicCubemap : register(u0);
 RWTexture2DArray<float4> DynamicCubemapRaw : register(u1);
 RWTexture2DArray<float4> DynamicCubemapPosition : register(u2);
 RWTexture2DArray<uint> CaptureCoverage : register(u3);
+#if defined(SEPARATE_SKY_HISTORY)
 RWTexture2DArray<float4> SkyHistory : register(u4);
+#endif
 
 Texture2D<float> DepthTexture : register(t0);
 Texture2D<float4> ColorTexture : register(t1);
@@ -577,9 +571,10 @@ void main(uint3 threadID : SV_DispatchThreadID)
 			float4 colorFinal = float4(
 				IrradianceToLinear(skySample),
 				1.0);
-			// Only normal capture writes this layer. Geometry and reprojection
-			// never erase it. Replace directly, avoiding temporal sky smearing.
+#if defined(SEPARATE_SKY_HISTORY)
+			// Geometry and reprojection never erase the separate sky history.
 			SkyHistory[threadID] = colorFinal;
+#endif
 			float4 positionFinal = float4(captureDirection, 0.0);
 			const float lerpFactor = CaptureOptions.z;
 			uint ignoredCoverageValue = 0;
@@ -680,19 +675,141 @@ void main(uint3 threadID : SV_DispatchThreadID)
 	return;
 }
 )";
+// SKYCOLOR BEGIN
+const char* kSkyColorShader=R"(
+Texture2D<float> DepthTexture : register(t0);
+Texture2D<float4> ColorTexture : register(t1);
+RWTexture2DArray<float4> SkyColor : register(u0);
+cbuffer UpdateData : register(b0)
+{
+	float4 ViewToWorld[3];
+	float4 CameraOrigin;
+	float4 CameraPreviousOrigin;
+	float4 NDCToViewMul;
+	float4 NDCToViewAdd;
+	row_major float4x4 InvProj;
+	float4 ColorViewport;
+	float4 ColorClamp;
+	float4 DepthViewport;
+	float4 HistoryOffset;
+	float4 CaptureOptions;
+};
+float3 IrradianceToLinear(float3 color)
+{
+	// Fixed capture calibration (-2 EV); applied once before history accumulation.
+	return color * 0.25;
+}
+
+// Adapted from CS IBL/DiffuseIBLCS.hlsl's D3D11-compatible 256-thread tree reduction.
+// Only the sum/count is needed here; no spherical-harmonics or IBL pipeline is ported.
+groupshared float4 sharedColor[256];
+
+float4 SkyPixel(float2 logicalUV)
+{
+    if (CaptureOptions.x > 0.5 && logicalUV.y >= CaptureOptions.y) return 0.0;
+    uint dw, dh; DepthTexture.GetDimensions(dw, dh);
+    uint cw, ch; ColorTexture.GetDimensions(cw, ch);
+    uint2 origin = uint2(DepthViewport.xy);
+    uint2 extent = uint2(DepthViewport.zw);
+    if (dw == 0 || dh == 0 || cw == 0 || ch == 0 || any(extent == 0) ||
+        any(origin >= uint2(dw,dh)) || any(extent > uint2(dw,dh)-origin)) return 0.0;
+    uint2 pixel = min(origin + uint2(logicalUV * float2(extent)), origin + extent - 1);
+    // Reject geometry and a one-pixel edge around it, including first-person depth.
+    // Color uses a point load to avoid sampling terrain through a bilinear footprint.
+    [unroll] for (int y=-1; y<=1; ++y)
+        [unroll] for (int x=-1; x<=1; ++x) {
+            int2 q=clamp(int2(pixel)+int2(x,y),int2(origin),int2(origin+extent)-1);
+            float depth=DepthTexture.Load(int3(q,0));
+            if (!isfinite(depth) || depth < 0.999999 || depth > 1.0) return 0.0;
+        }
+    float2 uv=clamp(ColorViewport.xy+logicalUV*ColorViewport.zw,ColorClamp.xy,ColorClamp.zw);
+    uint2 cp=min(uint2(uv*float2(cw,ch)),uint2(cw-1,ch-1));
+    float3 rgb=ColorTexture.Load(int3(cp,0)).rgb;
+    // Keep unresolved zeros and invalid HDR out of the persistent color. Do not
+    // boost blue, desaturate, tone map, or apply another exposure adjustment.
+    if (!all(isfinite(rgb)) || any(rgb<0.0) || any(rgb>262016.0) ||
+        max(rgb.r,max(rgb.g,rgb.b))<=0.0001) return 0.0;
+    return float4(IrradianceToLinear(rgb),1.0);
+}
+
+[numthreads(16,16,1)]
+void main(uint3 id:SV_DispatchThreadID, uint groupIndex:SV_GroupIndex)
+{
+    float4 contribution=0.0;
+    // A 32x32 screen grid: four sky-masked point samples per thread.
+    [unroll] for (uint y=0; y<2; ++y)
+        [unroll] for (uint x=0; x<2; ++x)
+            contribution+=SkyPixel((float2(id.xy*2+uint2(x,y))+0.5)/32.0);
+    sharedColor[groupIndex]=contribution;
+    GroupMemoryBarrierWithGroupSync();
+    [unroll] for (uint stride=256/2; stride>0; stride>>=1) {
+        if (groupIndex<stride)
+            sharedColor[groupIndex]+=sharedColor[groupIndex+stride];
+        GroupMemoryBarrierWithGroupSync();
+    }
+    if (groupIndex==0 && sharedColor[0].a>0.0) {
+        float3 average=sharedColor[0].rgb/sharedColor[0].a;
+        float4 previous=SkyColor[uint3(0,0,0)];
+        float3 rgb=previous.a>0.0 ? lerp(previous.rgb,average,CaptureOptions.z) : average;
+        [unroll] for (uint face=0;face<6;++face)
+            SkyColor[uint3(0,0,face)]=float4(rgb,1.0);
+    }
+    // No usable sky this update: retain the last observed sky until history reset.
+}
+)";
+// SKYCOLOR END
 
 
 	std::mutex g_logMutex;
 	const ULONGLONG g_logStart=GetTickCount64();
-	void Log(const std::string& text)
-	{
-		if (!g_diagnosticsEnabled.load(std::memory_order_relaxed) &&
-            text.find("FAIL")==std::string::npos && text.find("failed")==std::string::npos &&
-            text.find("aborted")==std::string::npos && text.find("unsupported")==std::string::npos) return;
+    // TINTTRACE BEGIN
+    LONGLONG PerfClock();
+    double PerfMilliseconds(LONGLONG ticks);
+    struct TintTraceClock {
+        static std::int64_t Now() { return PerfClock(); }
+        static double Milliseconds(std::int64_t ticks) { return PerfMilliseconds(ticks); }
+    };
+    using TintTraceRecorder=TintTrace::Recorder<TintTraceClock>;
+    TintTrace::Summary g_tintTraceSummary;
+    thread_local TintTraceRecorder* g_tintTraceCurrent=nullptr;
+    void TintTraceStep(TintTrace::Stage stage) { if(g_tintTraceCurrent)g_tintTraceCurrent->Step(stage); }
+    // TINTTRACE END
+    // TINTBATCH LOGGER BEGIN
+    void WriteLogBytes(std::string_view bytes)
+    {
+        TintTraceRecorder::LogTimer tintTraceLog(g_tintTraceCurrent);
         std::lock_guard lock(g_logMutex);
-		std::ofstream log(kLogPath, std::ios::out | std::ios::app);
-		log << "[+" << (GetTickCount64()-g_logStart) << "ms] " << text << '\n';
-	}
+        std::ofstream log(kLogPath, std::ios::out | std::ios::app);
+        log.write(bytes.data(),static_cast<std::streamsize>(bytes.size()));
+    }
+    struct TintReportWriter {
+        static std::uint64_t Timestamp() { return GetTickCount64()-g_logStart; }
+        static void Write(std::string_view bytes,unsigned messages) {
+            if(g_tintTraceCurrent) {
+                g_tintTraceCurrent->sample.logMessages+=messages;
+                TintTraceStep(TintTrace::Stage::ReportFlush);
+            }
+            WriteLogBytes(bytes);
+        }
+    };
+    using TintReportBatch=TintReports::Batch<TintReportWriter>;
+    void Log(const std::string& text)
+    {
+        if(!g_diagnosticsEnabled.load(std::memory_order_relaxed) && !TintReports::RetainedFailure(text))return;
+        if(TintReportBatch::Append(text))return;
+        if(g_tintTraceCurrent)++g_tintTraceCurrent->sample.logMessages;
+        const auto line="[+"+std::to_string(GetTickCount64()-g_logStart)+"ms] "+text+'\n';
+        WriteLogBytes(line);
+    }
+    template<class Builder> void LogDiagnostic(Builder&& builder) {
+        TintReports::Diagnostic(g_diagnosticsEnabled.load(std::memory_order_relaxed),
+            std::forward<Builder>(builder),[](const std::string& text) { Log(text); });
+    }
+    template<class Builder> void LogRecoveryDiagnostic(std::string_view failure,Builder&& builder) {
+        TintReports::Diagnostic(g_diagnosticsEnabled.load(std::memory_order_relaxed) || TintReports::RetainedFailure(failure),
+            std::forward<Builder>(builder),[](const std::string& text) { Log(text); });
+    }
+    // TINTBATCH LOGGER END
 
 	std::string Ptr(const void* p);
 
@@ -887,6 +1004,28 @@ bool VerifyNG984Mappings(std::uintptr_t deferred, std::uintptr_t anchor,
     return true;
 }
 
+// RUNTIMECOMPAT BEGIN
+bool VerifyOG163Mappings(std::uintptr_t deferred,std::uintptr_t anchor,
+    std::uintptr_t callsite,std::uintptr_t shaderManager)
+{
+    const auto base=reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
+    if (!base || g_runtimeVersion!="1.10.163.0" || deferred!=base+0x28529b0 ||
+        anchor!=base+0x1d0bfb0 || callsite!=base+0x1d0c04c || shaderManager!=base+0x30a06a8)
+        return false;
+    constexpr std::uint8_t deferredBytes[]={0x48,0x8b,0xc4,0x55,0x48,0x8d,0xa8,0x88,0xf9,0xff,0xff,0x48,0x81,0xec,0x70,0x07,0x00,0x00,0x48,0x89,0x58,0xf0,0x0f,0xb6};
+    constexpr std::uint8_t anchorBytes[]={0x48,0x89,0x5c,0x24,0x08,0x48,0x89,0x6c,0x24,0x10,0x48,0x89,0x74,0x24,0x18,0x48,0x89,0x7c,0x24,0x20,0x41,0x56,0x48,0x83};
+    constexpr std::uint8_t targetBytes[]={0x88,0x54,0x24,0x10,0x88,0x4c,0x24,0x08,0x53,0x55,0x56,0x57,0x41,0x54,0x41,0x56,0x41,0x57,0x48,0x83,0xec,0x50,0x44,0x8b};
+    if (!MatchAE240Bytes(deferred,deferredBytes) || !MatchAE240Bytes(anchor,anchorBytes) ||
+        !IsReadableSpan(callsite,5) || *reinterpret_cast<const std::uint8_t*>(callsite)!=0xe8)
+        return false;
+    const auto target=callsite+5+static_cast<std::intptr_t>(*reinterpret_cast<const std::int32_t*>(callsite+1));
+    return target==base+0x1d16c00 && MatchAE240Bytes(target,targetBytes) &&
+        RE::ID::BSGraphics::GetRendererData.address()==base+0x609bf80 &&
+        RE::ID::Main::WorldRootNode.address()==base+0x5aa4358 &&
+        RE::ID::PlayerCharacter::Singleton.address()==base+0x59d6fd0;
+}
+
+// RUNTIMECOMPAT END
 	bool ProbeRuntimeMappings()
 	{
 		if (!g_runtimeProfile.enableRendererHooks || !g_runtimeProfile.deferredLightsID ||
@@ -909,6 +1048,15 @@ bool VerifyNG984Mappings(std::uintptr_t deferred, std::uintptr_t anchor,
 		if (g_runtimeProfile.family == RuntimeFamily::ng &&
 			!VerifyNG984Mappings(deferred,anchor,callsite,shaderManager)) return false;
 
+// RUNTIMECOMPAT BEGIN
+        if (g_runtimeProfile.family==RuntimeFamily::og) {
+            if (!VerifyOG163Mappings(deferred,anchor,callsite,shaderManager)) {
+                Log("OG163 PREFLIGHT FAILED: exact renderer mappings or hook bytes differ; no hooks installed.");
+                return false;
+            }
+            Log("OG163 BINARY PREFLIGHT PASS: renderer mappings and hook targets match.");
+        }
+// RUNTIMECOMPAT END
 		Log("COMPAT: DeferredLights address=" + Ptr(reinterpret_cast<const void*>(deferred)) +
 			" bytes=" + ProbeBytes(deferred,24));
 		Log("COMPAT: DrawAnchor address=" + Ptr(reinterpret_cast<const void*>(anchor)) +
@@ -1023,18 +1171,10 @@ bool g_reprojectFailed=false;
 bool CreateReprojectResources(ID3D11Device* device)
 {
     if (g_reprojectConstants) return true;
-    const char* entries[3]={"DepthPass","OwnerPass","ResolvePass"};
-    for (unsigned i=0;i<3;++i) {
-        ComPtr<ID3DBlob> code,error;
-        const HRESULT hr=D3DCompile(kReprojectShader,strlen(kReprojectShader),"Reprojection",
-            nullptr,nullptr,entries[i],"cs_5_0",D3DCOMPILE_ENABLE_STRICTNESS|D3DCOMPILE_OPTIMIZATION_LEVEL3,
-            0,code.GetAddressOf(),error.GetAddressOf());
-        if (FAILED(hr)) {
-            Log(std::string("REPROJECT shader failed: ")+entries[i]+(error ?
-                std::string(static_cast<const char*>(error->GetBufferPointer()),error->GetBufferSize()):""));
-            return false;
-        }
-        if (FAILED(device->CreateComputeShader(code->GetBufferPointer(),code->GetBufferSize(),nullptr,
+    static_assert(std::size(g_reprojectCS)==std::size(DCF4Shaders::Reproject));
+    for (unsigned i=0;i<std::size(g_reprojectCS);++i) {
+        const auto& code=DCF4Shaders::Reproject[i];
+        if (FAILED(device->CreateComputeShader(code.data,code.size,nullptr,
             g_reprojectCS[i].ReleaseAndGetAddressOf()))) return false;
     }
     D3D11_TEXTURE2D_DESC d{};
@@ -1120,8 +1260,7 @@ using Microsoft::WRL::ComPtr;
 		if (enabled!=g_requestedEnabled) g_autoStartPending=true;
 		g_requestedEnabled=enabled;
         SetDiagnosticsEnabled(enabled && ReadMCMInt("bDiagnostics",0)!=0);
-		g_requestedReprojection=ReadMCMInt("bReprojection",1)!=0;
-        g_requestedRoughness=std::clamp(ReadMCMInt("iSharpnessMode",2),0,4);
+		g_requestedReprojection=ReadMCMInt("bReprojection",0)!=0;
 	}
 
 	std::string Ptr(const void* p)
@@ -1154,10 +1293,10 @@ struct UniversalStyleConstants
 {
 	std::array<XMFLOAT4,128> tint{};
 	std::array<XMFLOAT4,128> intensity{};
+    std::array<UINT,128> updateCubes{};
 };
 struct UniversalPool
 {
-    std::array<Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>,8> materialViews;
     UINT cubes = 0;
     int exteriorMatchState=-4;
 	bool standalone=false;
@@ -1165,10 +1304,11 @@ struct UniversalPool
     Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> view;
     std::array<Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView>, 8> mipUAVs;
-	std::array<Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>, 8> originalMipSRVs;
+	Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> originalMips;
 	UniversalStyleConstants style{}; // original hue/saturation plus bounded luminance intensity
 	Microsoft::WRL::ComPtr<ID3D11Buffer> tintConstants;
 	bool tintDirty=true;
+    UINT lastUpdatedCubes=0;
     bool ready = false; // Published contents passed initial analysis; pending style edits do not invalidate them.
     bool failed = false;
 };
@@ -1195,10 +1335,14 @@ std::size_t g_nonCubeHand=0;
 std::vector<UniversalPool> g_universalPools;
 std::unordered_map<ID3D11ShaderResourceView*, ID3D11ShaderResourceView*> g_materialViewLookup;
 std::uint64_t g_cacheHits=0,g_cacheMisses=0,g_cacheInserts=0,g_cacheEvictions=0;
+// BINDCPU BEGIN
+std::uint64_t g_cacheClockSteps=0;
+std::size_t g_cacheClockMax=0;
+// BINDCPU END
 struct BindingResult { ID3D11ShaderResourceView* view; bool replacement; };
 Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> g_universalSlots[128];
 Microsoft::WRL::ComPtr<ID3D11ComputeShader> g_universalReplicateCS;
-std::array<Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>, 8> g_universalLiveMipSRVs;
+Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> g_universalLiveMips;
 bool g_universalComputeFailed = false;
 UINT g_universalTotalCubes = 0;
 bool UniversalFloatSampleFormat(DXGI_FORMAT f)
@@ -1230,10 +1374,21 @@ void ResetNonCubeCache()
 void CacheNonCubeView(ID3D11ShaderResourceView* view)
 {
     // Only called for a newly classified ordinary view on the render thread.
+    // BINDCPU BEGIN
+    const bool diagnostics=g_diagnosticsEnabled.load(std::memory_order_relaxed);
+    std::size_t scanned=0;
+    // BINDCPU END
     while(g_nonCubeClock[g_nonCubeHand] && g_nonCubeRecent[g_nonCubeHand]) {
+        if(diagnostics)++scanned; // BINDCPU
         g_nonCubeRecent[g_nonCubeHand]=false;
         g_nonCubeHand=(g_nonCubeHand+1)%g_nonCubeClock.size();
     }
+    // BINDCPU BEGIN
+    if(diagnostics) {
+        g_cacheClockSteps+=scanned;
+        g_cacheClockMax=std::max(g_cacheClockMax,scanned);
+    }
+    // BINDCPU END
     const auto slot=g_nonCubeHand;
     if(auto* old=g_nonCubeClock[slot]) { if(g_diagnosticsEnabled) ++g_cacheEvictions; g_universalNonCubeViews.erase(old); }
     if(g_diagnosticsEnabled) ++g_cacheInserts;
@@ -1243,7 +1398,7 @@ void CacheNonCubeView(ID3D11ShaderResourceView* view)
 }
 
 // Rebuilt only when owned views change, never for ordinary texture bindings.
-// Keys and values are borrowed from the live/pool ComPtrs and their mip caches.
+// Keys and values are borrowed from the live/pool ComPtrs.
 void RebuildMaterialViewLookup()
 {
     g_materialViewLookup.clear();
@@ -1252,9 +1407,6 @@ void RebuildMaterialViewLookup()
     };
     add(g_liveSRV.Get(),g_liveSRV.Get());
     for (const auto& pool:g_universalPools) add(pool.view.Get(),pool.view.Get());
-    for (const auto& view:g_liveMaterialViews) add(view.Get(),g_liveSRV.Get());
-    for (const auto& pool:g_universalPools)
-        for (const auto& view:pool.materialViews) add(view.Get(),pool.view.Get());
 }
 ID3D11ShaderResourceView* CurrentMaterialView(ID3D11ShaderResourceView* view)
 {
@@ -1284,19 +1436,17 @@ bool IsExteriorFallbackView(ID3D11ShaderResourceView* view);
 
 BindingResult UniversalBind(UINT slot, ID3D11ShaderResourceView* view)
 {
-    if (auto* selected=CurrentMaterialView(view)) {
-        if (selected!=view) {
-            static bool loggedRetained=false;
-            if (!loggedRetained) { Log("MIP: retained replacement view redirected to current softness."); loggedRetained=true; }
-        }
-        return {selected,true};
-    }
     if (!view) { g_universalSlots[slot].Reset(); return {view,false}; }
+    // Retained ordinary views and our cubemap views are disjoint. Reuse the
+    // existing classification before checking the replacement table.
     if (const auto cached=g_universalNonCubeViews.find(view); cached != g_universalNonCubeViews.end()) {
         g_nonCubeRecent[cached->second.slot]=true;
         if(g_diagnosticsEnabled) ++g_cacheHits;
         g_universalSlots[slot].Reset();
         return {view,false};
+    }
+    if (auto* selected=CurrentMaterialView(view)) {
+        return {selected,true};
     }
     if(g_diagnosticsEnabled) ++g_cacheMisses;
     auto found = g_universalViews.find(view);
@@ -1311,7 +1461,7 @@ BindingResult UniversalBind(UINT slot, ID3D11ShaderResourceView* view)
                 found->second.analyzed=true;
                 found->second.keepOriginal=false;
                 found->second.exteriorBrightness=false;
-                Log("TINT BIND: named standalone exterior uses calibrated live cube; no output scaling.");
+                LogDiagnostic([&] { return "TINT BIND: named standalone exterior uses calibrated live cube; no output scaling."; });
             }
             if (!found->second.analyzed || found->second.keepOriginal) return {view,false};
 			if (found->second.pool!=UINT_MAX && found->second.pool<g_universalPools.size()) {
@@ -1319,9 +1469,9 @@ BindingResult UniversalBind(UINT slot, ID3D11ShaderResourceView* view)
 				if (pool.failed) return {view,false};
 				if (pool.ready) {
 					if (!found->second.loggedStyledBinding) {
-						Log("TINT BIND: standalone pool="+
+						LogDiagnostic([&] { return "TINT BIND: standalone pool="+
 							std::to_string(found->second.pool)+" scale="+
-							std::to_string(pool.style.intensity[0].x));
+							std::to_string(pool.style.intensity[0].x); });
 						found->second.loggedStyledBinding=true;
 					}
 					return {pool.view.Get(),true};
@@ -1438,41 +1588,66 @@ void UniversalRepair(bool restore)
 }
 
 const char* kUniversalReplicateShader = R"(
-Texture2DArray<float4> SourceMip : register(t0);
-Texture2DArray<float4> OriginalMip : register(t1);
-RWTexture2DArray<float4> DestinationMip : register(u0);
-cbuffer TintData : register(b0) { float4 Tint[128]; float4 Intensity[128]; };
+Texture2DArray<float4> SourceMips : register(t0);
+Texture2DArray<float4> OriginalMips : register(t1);
+RWTexture2DArray<float4> Destination0 : register(u0);
+RWTexture2DArray<float4> Destination1 : register(u1);
+RWTexture2DArray<float4> Destination2 : register(u2);
+RWTexture2DArray<float4> Destination3 : register(u3);
+RWTexture2DArray<float4> Destination4 : register(u4);
+RWTexture2DArray<float4> Destination5 : register(u5);
+RWTexture2DArray<float4> Destination6 : register(u6);
+RWTexture2DArray<float4> Destination7 : register(u7);
+cbuffer TintData : register(b0) { float4 Tint[128]; float4 Intensity[128]; uint4 UpdateCubes[32]; };
 
-[numthreads(8, 8, 1)]
-void main(uint3 id : SV_DispatchThreadID)
+float4 ReplicateTexel(uint3 id, uint mip, uint width, uint height)
 {
-    uint width, height, layers;
-    DestinationMip.GetDimensions(width, height, layers);
-    if (id.x >= width || id.y >= height || id.z >= layers) return;
-    float4 source=SourceMip.Load(int4(id.xy, id.z % 6, 0));
+    float4 source=SourceMips.Load(int4(id.xy, id.z % 6, mip));
     float4 tint=Tint[id.z/6];
-    // tint.w == -2 marks saturated, directionally inconsistent authored
-    // cubemaps. Preserve their complete static texels instead of replacing
-    // them with an untinted dynamic cube.
+    // Preserve directionally inconsistent authored cubemaps at each source mip.
     if (tint.w<=-1.5) {
-        uint ow,oh,olayers;
-        OriginalMip.GetDimensions(ow,oh,olayers);
+        uint ow=1,oh=1,olayers=0,levels=1;
+        OriginalMips.GetDimensions(0,ow,oh,olayers,levels);
+        uint originalMip=min(mip,levels-1);
+        OriginalMips.GetDimensions(originalMip,ow,oh,olayers,levels);
         uint2 originalXY=min(uint2((float2(id.xy)+0.5)*float2(ow,oh)/
             float2(width,height)),uint2(ow-1,oh-1));
-        DestinationMip[id]=max(OriginalMip.Load(int4(originalXY,id.z,0)),0.0);
-        return;
+        source=OriginalMips.Load(int4(originalXY,id.z,originalMip));
     }
-    if (tint.w>=0.0) {
-        const float3 weights=float3(0.2126,0.7152,0.0722);
-        float oldY=dot(source.rgb,weights);
-        float3 colored=source.rgb*tint.rgb;
-        colored*=oldY/max(dot(colored,weights),0.0001);
-        source.rgb=colored;
+    else {
+        if (tint.w>=0.0) {
+            const float3 weights=float3(0.2126,0.7152,0.0722);
+            float oldY=dot(source.rgb,weights);
+            float3 colored=source.rgb*tint.rgb;
+            colored*=oldY/max(dot(colored,weights),0.0001);
+            source.rgb=colored;
+        }
+        source.rgb*=Intensity[id.z/6].x;
     }
-	// Preserve the original cubemap's authored reflection intensity without
-	// changing roughness, alpha, or the material's transparency parameters.
-	source.rgb*=Intensity[id.z/6].x;
-    DestinationMip[id]=max(source,0.0);
+    return max(source,0.0);
+}
+
+// Same 8x8 workgroups as separate mip dispatches; each group writes one mip.
+#define WRITE_MIP(level, firstGroup, groupsWide) \
+    uint tile=group.x-firstGroup; \
+    uint cube=UpdateCubes[(group.z/6)/4][(group.z/6)%4]; \
+    uint3 id=uint3(uint2(tile%groupsWide,tile/groupsWide)*8+thread.xy,cube*6+group.z%6); \
+    uint width,height,layers; \
+    Destination##level.GetDimensions(width,height,layers); \
+    if (id.x<width && id.y<height && id.z<layers) \
+        Destination##level[id]=ReplicateTexel(id,level,width,height);
+
+[numthreads(8, 8, 1)]
+void main(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
+{
+    if      (group.x<256) { WRITE_MIP(0,  0,16) }
+    else if (group.x<320) { WRITE_MIP(1,256, 8) }
+    else if (group.x<336) { WRITE_MIP(2,320, 4) }
+    else if (group.x<340) { WRITE_MIP(3,336, 2) }
+    else if (group.x<341) { WRITE_MIP(4,340, 1) }
+    else if (group.x<342) { WRITE_MIP(5,341, 1) }
+    else if (group.x<343) { WRITE_MIP(6,342, 1) }
+    else if (group.x<344) { WRITE_MIP(7,343, 1) }
 }
 )";
 
@@ -1480,85 +1655,108 @@ bool UniversalEnsureCompute(ID3D11Device* device)
 {
     if (g_universalReplicateCS) return true;
     if (g_universalComputeFailed || !device || !g_liveTexture) return false;
-    Microsoft::WRL::ComPtr<ID3DBlob> shader, errors;
-    const HRESULT compile = D3DCompile(kUniversalReplicateShader,
-        strlen(kUniversalReplicateShader), "DCF4UniversalReplicateCS", nullptr, nullptr,
-        "main", "cs_5_0", D3DCOMPILE_ENABLE_STRICTNESS, 0,
-        shader.GetAddressOf(), errors.GetAddressOf());
-    if (FAILED(compile) || !shader || FAILED(device->CreateComputeShader(
-        shader->GetBufferPointer(), shader->GetBufferSize(), nullptr,
+    const auto& shader=DCF4Shaders::UniversalReplicate;
+    if (FAILED(device->CreateComputeShader(shader.data,shader.size,nullptr,
         g_universalReplicateCS.GetAddressOf()))) {
         g_universalComputeFailed = true;
-        std::string message = "UNIVERSAL: compute replication unavailable; original bindings retained.";
-        if (errors) message += " " + std::string(static_cast<const char*>(errors->GetBufferPointer()), errors->GetBufferSize());
-        Log(message);
+        Log("UNIVERSAL: compute replication unavailable; original bindings retained.");
         return false;
     }
-    for (UINT mip = 0; mip < 8; ++mip) {
-        D3D11_SHADER_RESOURCE_VIEW_DESC v{};
-        v.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
-        v.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DARRAY;
-        v.Texture2DArray.MostDetailedMip = mip;
-        v.Texture2DArray.MipLevels = 1;
-        v.Texture2DArray.FirstArraySlice = 0;
-        v.Texture2DArray.ArraySize = 6;
-        if (FAILED(device->CreateShaderResourceView(g_liveTexture.Get(), &v,
-            g_universalLiveMipSRVs[mip].GetAddressOf()))) {
-            g_universalComputeFailed = true;
-            g_universalReplicateCS.Reset();
-            for (auto& srv : g_universalLiveMipSRVs) srv.Reset();
-            Log("UNIVERSAL: source mip view creation failed; original bindings retained.");
-            return false;
-        }
+    D3D11_SHADER_RESOURCE_VIEW_DESC v{};
+    v.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    v.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DARRAY;
+    v.Texture2DArray.MipLevels = kCubeMipCount;
+    v.Texture2DArray.ArraySize = 6;
+    if (FAILED(device->CreateShaderResourceView(g_liveTexture.Get(), &v,
+        g_universalLiveMips.GetAddressOf()))) {
+        g_universalComputeFailed = true;
+        g_universalReplicateCS.Reset();
+        g_universalLiveMips.Reset();
+        Log("UNIVERSAL: source mip view creation failed; original bindings retained.");
+        return false;
     }
-    Log("UNIVERSAL: compute array replication ready (selected mip only).");
+    Log("UNIVERSAL: full-chain array replication ready (one dispatch per pool; game mip selection).");
     return true;
 }
 
-void UniversalReplicatePool(UniversalPool& pool, UINT mip)
-{
+struct UniversalReplicationScope {
     ID3D11ComputeShader* oldCS = nullptr;
     ID3D11ClassInstance* oldInstances[256]{}; UINT oldInstanceCount=256;
     ID3D11ShaderResourceView* oldSRVs[2]{};
-    ID3D11UnorderedAccessView* oldUAV = nullptr;
+    ID3D11UnorderedAccessView* oldUAVs[8]{};
 	ID3D11Buffer* oldCB=nullptr;
+    UniversalReplicationScope() {
     g_liveContext->CSGetShader(&oldCS, oldInstances, &oldInstanceCount);
     g_liveContext->CSGetShaderResources(0, 2, oldSRVs);
-    g_liveContext->CSGetUnorderedAccessViews(0, 1, &oldUAV);
+    g_liveContext->CSGetUnorderedAccessViews(0, 8, oldUAVs);
 	g_liveContext->CSGetConstantBuffers(0,1,&oldCB);
     g_liveContext->CSSetShader(g_universalReplicateCS.Get(), nullptr, 0);
-	if (pool.tintDirty && pool.tintConstants) {
-		g_liveContext->UpdateSubresource(pool.tintConstants.Get(),0,nullptr,&pool.style,0,0);
-		pool.tintDirty=false;
-	}
-	auto* tintCB=pool.tintConstants.Get();
-	g_liveContext->CSSetConstantBuffers(0,1,&tintCB);
-    {
-        ID3D11ShaderResourceView* sources[2]{
-            g_universalLiveMipSRVs[mip].Get(),pool.originalMipSRVs[mip].Get()};
-        auto* destination = pool.mipUAVs[mip].Get();
-        g_liveContext->CSSetShaderResources(0, 2, sources);
-        g_liveContext->CSSetUnorderedAccessViews(0, 1, &destination, nullptr);
-        const UINT size = 128u >> mip;
-        g_liveContext->Dispatch((size + 7) / 8, (size + 7) / 8, pool.cubes * 6);
-        ID3D11ShaderResourceView* nullSRVs[2]{};
-        ID3D11UnorderedAccessView* nullUAV = nullptr;
-        g_liveContext->CSSetShaderResources(0, 2, nullSRVs);
-        g_liveContext->CSSetUnorderedAccessViews(0, 1, &nullUAV, nullptr);
     }
+    ~UniversalReplicationScope() {
     g_liveContext->CSSetShader(oldCS, oldInstances, oldInstanceCount);
     for (UINT i=0;i<oldInstanceCount;++i) if (oldInstances[i]) oldInstances[i]->Release();
     g_liveContext->CSSetShaderResources(0, 2, oldSRVs);
-    g_liveContext->CSSetUnorderedAccessViews(0, 1, &oldUAV, nullptr);
+    g_liveContext->CSSetUnorderedAccessViews(0, 8, oldUAVs, nullptr);
 	g_liveContext->CSSetConstantBuffers(0,1,&oldCB);
     if (oldCS) oldCS->Release();
     for (auto* srv:oldSRVs) if (srv) srv->Release();
-    if (oldUAV) oldUAV->Release();
+    for (auto* uav:oldUAVs) if (uav) uav->Release();
 	if (oldCB) oldCB->Release();
+    }
+};
+
+bool CanReuseRetainedPoolSource(ID3D11ShaderResourceView* view);
+void CommitRetainedPoolSource(ID3D11ShaderResourceView* view);
+void ReportPoolWork();
+
+UINT PreparePoolUpdates(UniversalPool& pool)
+{
+    const bool reuse=!pool.standalone && !pool.tintDirty &&
+        CanReuseRetainedPoolSource(pool.originalView.Get());
+    UINT count=0;
+    for (UINT cube=0;cube<pool.cubes;++cube) {
+        if (reuse && pool.style.tint[cube].w<=-1.5f) continue;
+        auto& index=pool.style.updateCubes[count++];
+        if (index!=cube) { index=cube; pool.tintDirty=true; }
+    }
+    pool.lastUpdatedCubes=count;
+    if(g_diagnosticsEnabled) DCFDiag::PoolSelection(reuse,count); // POOLTRACE
+    return count;
+}
+
+void UniversalDispatchPool(UniversalPool& pool)
+{
+    const UINT count=PreparePoolUpdates(pool);
+    if (!count) return;
+    if(g_diagnosticsEnabled) DCFDiag::PoolStep(PoolTrace::Step::Constants); // POOLTRACE
+    if (pool.tintDirty && pool.tintConstants) {
+        g_liveContext->UpdateSubresource(pool.tintConstants.Get(),0,nullptr,&pool.style,0,0);
+        pool.tintDirty=false;
+    }
+    if(g_diagnosticsEnabled) DCFDiag::PoolStep(PoolTrace::Step::Bindings); // POOLTRACE
+    auto* tintCB=pool.tintConstants.Get();
+    g_liveContext->CSSetConstantBuffers(0,1,&tintCB);
+    ID3D11ShaderResourceView* sources[2]{g_universalLiveMips.Get(),pool.originalMips.Get()};
+    ID3D11UnorderedAccessView* destinations[8]{};
+    for (UINT mip=0;mip<kCubeMipCount;++mip) destinations[mip]=pool.mipUAVs[mip].Get();
+    g_liveContext->CSSetShaderResources(0,2,sources);
+    g_liveContext->CSSetUnorderedAccessViews(0,8,destinations,nullptr);
+    // 256+64+16+4+1+1+1+1 groups, identical to the eight separate mip passes.
+    if(g_diagnosticsEnabled) DCFDiag::PoolStep(PoolTrace::Step::Dispatch); // POOLTRACE
+    g_liveContext->Dispatch(344,1,count*6);
+    if(g_diagnosticsEnabled) DCFDiag::PoolStep(PoolTrace::Step::Unbind); // POOLTRACE
+    ID3D11ShaderResourceView* nullSRVs[2]{};
+    ID3D11UnorderedAccessView* nullUAVs[8]{};
+    g_liveContext->CSSetShaderResources(0,2,nullSRVs);
+    g_liveContext->CSSetUnorderedAccessViews(0,8,nullUAVs,nullptr);
+    if(g_diagnosticsEnabled) DCFDiag::PoolStep(PoolTrace::Step::Commit); // POOLTRACE
+    CommitRetainedPoolSource(pool.originalView.Get());
 }
 
 void UniversalPublish()
 {
+    if(g_diagnosticsEnabled) DCFDiag::BeginPass("Pool setup");
+    struct EndPoolTiming { ~EndPoolTiming() { if(g_diagnosticsEnabled) DCFDiag::EndPass(); } } timing;
     Microsoft::WRL::ComPtr<ID3D11Device> device;
     g_liveContext->GetDevice(device.GetAddressOf());
     bool materialViewsChanged=false;
@@ -1575,12 +1773,12 @@ void UniversalPublish()
         D3D11_SHADER_RESOURCE_VIEW_DESC v{}; v.Format = d.Format;
 		if (pool.standalone) {
 			v.ViewDimension=D3D11_SRV_DIMENSION_TEXTURECUBE;
-			v.TextureCube.MostDetailedMip=g_materialMip;
-			v.TextureCube.MipLevels=1;
+			v.TextureCube.MostDetailedMip=0;
+			v.TextureCube.MipLevels=kCubeMipCount;
 		} else {
 			v.ViewDimension = D3D11_SRV_DIMENSION_TEXTURECUBEARRAY;
-			v.TextureCubeArray.MostDetailedMip = g_materialMip;
-			v.TextureCubeArray.MipLevels = 1;
+			v.TextureCubeArray.MostDetailedMip = 0;
+			v.TextureCubeArray.MipLevels = kCubeMipCount;
 			v.TextureCubeArray.First2DArrayFace = 0;
 			v.TextureCubeArray.NumCubes = pool.cubes;
 		}
@@ -1599,19 +1797,18 @@ void UniversalPublish()
 			D3D11_TEXTURE2D_DESC originalTextureDesc{};
 			if (!originalResource || FAILED(originalResource.As(&originalTexture))) poolResult=E_FAIL;
 			if (SUCCEEDED(poolResult)) originalTexture->GetDesc(&originalTextureDesc);
-			for (UINT mip=0;SUCCEEDED(poolResult) && mip<8;++mip) {
-				D3D11_SHADER_RESOURCE_VIEW_DESC source{}; source.Format=original.Format;
-				source.ViewDimension=D3D11_SRV_DIMENSION_TEXTURE2DARRAY;
-				source.Texture2DArray.MostDetailedMip=std::min(
-					(pool.standalone ? original.TextureCube.MostDetailedMip :
-						original.TextureCubeArray.MostDetailedMip)+mip,originalTextureDesc.MipLevels-1);
-				source.Texture2DArray.MipLevels=1;
-				source.Texture2DArray.FirstArraySlice=pool.standalone ? 0 :
-					original.TextureCubeArray.First2DArrayFace;
-				source.Texture2DArray.ArraySize=pool.cubes*6;
-				poolResult=device->CreateShaderResourceView(originalResource.Get(),&source,
-					pool.originalMipSRVs[mip].GetAddressOf());
-			}
+            if (SUCCEEDED(poolResult)) {
+                D3D11_SHADER_RESOURCE_VIEW_DESC source{}; source.Format=original.Format;
+                source.ViewDimension=D3D11_SRV_DIMENSION_TEXTURE2DARRAY;
+                source.Texture2DArray.MostDetailedMip=std::min(
+                    pool.standalone ? original.TextureCube.MostDetailedMip :
+                    original.TextureCubeArray.MostDetailedMip,originalTextureDesc.MipLevels-1);
+                source.Texture2DArray.MipLevels=originalTextureDesc.MipLevels-source.Texture2DArray.MostDetailedMip;
+                source.Texture2DArray.FirstArraySlice=pool.standalone ? 0 : original.TextureCubeArray.First2DArrayFace;
+                source.Texture2DArray.ArraySize=pool.cubes*6;
+                poolResult=device->CreateShaderResourceView(originalResource.Get(),&source,
+                    pool.originalMips.GetAddressOf());
+            }
 		}
         for (UINT mip = 0; SUCCEEDED(poolResult) && mip < 8; ++mip) {
             D3D11_UNORDERED_ACCESS_VIEW_DESC u{};
@@ -1635,14 +1832,26 @@ void UniversalPublish()
         for (auto& pool : g_universalPools) pool.ready=false;
         return;
     }
+    if(g_diagnosticsEnabled) { DCFDiag::EndPass(); DCFDiag::BeginPass("Pool replication"); }
+    if(g_diagnosticsEnabled) DCFDiag::BeginPoolReplication(g_reprojectEnabled,GetTickCount64()-g_logStart,unsigned(g_universalPools.size())); // POOLTRACE
+    {
+        UniversalReplicationScope state;
+        if(g_diagnosticsEnabled) DCFDiag::EndPoolStateSave(); // POOLTRACE
     for (auto& pool : g_universalPools) {
         if (!pool.texture || pool.failed) continue;
-        UniversalReplicatePool(pool, g_materialMip);
+        if(g_diagnosticsEnabled) DCFDiag::BeginPool(unsigned(&pool-g_universalPools.data()),pool.cubes,pool.standalone,pool.tintDirty,pool.originalMips.Get(),pool.texture.Get()); // POOLTRACE
+        UniversalDispatchPool(pool);
+        if(g_diagnosticsEnabled) DCFDiag::EndPool(); // POOLTRACE
         // Initial arrays must be regenerated after reference analysis. Subsequent
         // tint edits leave this completed output available until the next update.
         pool.ready = pool.standalone ||
             (pool.exteriorMatchState!=-4 && pool.exteriorMatchState!=-3);
     }
+        if(g_diagnosticsEnabled) DCFDiag::BeginPoolStateRestore(); // POOLTRACE
+    }
+    if(g_diagnosticsEnabled) DCFDiag::EndPoolReplication(); // POOLTRACE
+    if(g_diagnosticsEnabled) { DCFDiag::EndPass(); DCFDiag::BeginPass("Tint analysis"); }
+    ReportPoolWork();
     TintAnalysisTick(device.Get());
 }
 
@@ -1659,22 +1868,42 @@ void UniversalReset()
     g_universalTotalCubes = 0;
     g_universalComputeFailed = false;
     g_universalReplicateCS.Reset();
-    for (auto& srv : g_universalLiveMipSRVs) srv.Reset();
+    g_universalLiveMips.Reset();
     ResetTintAnalysis();
 }
 // Capture the named exterior fallback texture.
 struct CellFallbackLoadScope {
-    int kind=0; // 1 exterior, 2 interior
+    int kind=0; // 1 named exterior texture
     Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> view;
 };
 thread_local CellFallbackLoadScope* g_cellFallbackScope=nullptr;
 std::mutex g_cellFallbackMutex;
-Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> g_namedCellFallback[2];
+Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> g_namedCellFallback[1];
+// Epochs bracket native file-texture operations, including same-view writes.
+bool g_streamingRoutesVerified=false;
+std::atomic_uint64_t g_fallbackNotificationEpoch{0};
+std::atomic_uint g_fallbackNotificationActive{0};
+struct FallbackNotificationScope {
+    const char* route;
+    explicit FallbackNotificationScope(const char* value):route(value) {
+        g_fallbackNotificationActive.fetch_add(1);
+        g_fallbackNotificationEpoch.fetch_add(1);
+    }
+    ~FallbackNotificationScope() {
+        const auto epoch=g_fallbackNotificationEpoch.fetch_add(1)+1;
+        g_fallbackNotificationActive.fetch_sub(1);
+        Log(std::string("STREAM AUDIT: notification completed route=")+route+" epoch="+std::to_string(epoch));
+    }
+};
 std::atomic_int g_sampledCellKind{0};
 std::atomic_bool g_cellTaskPending{false};
 std::atomic_uint g_cellEpoch{0};
 int g_activeCellKind=0;
+bool UseSeparateSkyHistory()
+{
+    return g_reprojectEnabled && g_activeCellKind==1;
+}
 ULONGLONG g_nextCellPoll=0;
 
 using CellFallbackLoad_t=void(*)(void*,RE::NiTexture*);
@@ -1805,22 +2034,317 @@ void SubmitCellFallback(const CellFallbackLoadScope& scope,const char* route)
     Log(std::string("CELL FALLBACK: captured exterior mipblur_DefaultOutside1.dds through ")+
         route+"; pixels and format are not fingerprinted.");
 }
+// RUNTIMECOMPAT BEGIN
+#include "RuntimeStreamingProfiles.h"
+inline bool IsKnownAddictolLoad(std::uintptr_t function,std::uintptr_t game);
+bool IsLegacyRuntime()
+{
+    return (g_runtimeProfile.family==RuntimeFamily::og && g_runtimeVersion=="1.10.163.0") ||
+        (g_runtimeProfile.family==RuntimeFamily::ng && g_runtimeVersion=="1.10.984.0");
+}
+bool LegacyRouteHash(std::uintptr_t address,const RuntimeStreaming::Route& route)
+{
+    if (!route.length || route.length>2048 || !IsExecutableAddress(address) || !IsReadableSpan(address,route.length)) return false;
+    std::array<unsigned char,32> actual{};
+    BCRYPT_ALG_HANDLE algorithm=nullptr;
+    if (BCryptOpenAlgorithmProvider(&algorithm,BCRYPT_SHA256_ALGORITHM,nullptr,0)<0) return false;
+    const auto status=BCryptHash(algorithm,nullptr,0,reinterpret_cast<PUCHAR>(address),route.length,actual.data(),unsigned(actual.size()));
+    BCryptCloseAlgorithmProvider(algorithm,0);
+    return status>=0 && actual==route.sha256;
+}
+bool VerifyLegacyStreamingRoutes(const std::uintptr_t* table)
+{
+    if (!IsLegacyRuntime()) return false;
+    const auto* profile=RuntimeStreaming::Find(g_runtimeVersion);
+    const auto base=reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
+    if (!profile || !base || reinterpret_cast<std::uintptr_t>(table)!=base+profile->vtable ||
+        !IsReadableSpan(reinterpret_cast<std::uintptr_t>(table),40*sizeof(std::uintptr_t))) {
+        Log("TINT CACHE VERIFY: legacy version/vtable span mismatch; preserving periodic probes.");
+        return false;
+    }
+    for (const auto& route:profile->routes) {
+        const bool native=table[route.slot]==base+route.rva && LegacyRouteHash(table[route.slot],route);
+        const bool reviewedLoad=!native && route.slot==26 && IsKnownAddictolLoad(table[26],base);
+        if (!native && !reviewedLoad) {
+            Log("TINT CACHE VERIFY: "+g_runtimeVersion+" native slot="+std::to_string(route.slot)+
+                " address/hash mismatch; preserving periodic probes.");
+            return false;
+        }
+        if (reviewedLoad) Log("TINT CACHE VERIFY: exact Addictol 1.7.0 legacy load verified; preserving its behavior.");
+    }
+    return true;
+}
+
+// The name belongs to the live NiTexture argument, not to a guessed array slice.
+// Existing FO4 CS TextureSrv convention: rendererTexture's first pointer is its SRV.
+// Read only on verified OG/NG routes while the native caller owns the texture.
+void AdoptLegacyNamedView(RE::NiTexture* texture,CellFallbackLoadScope& scope)
+{
+    if (scope.view || !IsLegacyRuntime() || !g_streamingRoutesVerified ||
+        NamedFallbackKind(texture)!=1 || !texture->rendererTexture ||
+        !IsReadableSpan(reinterpret_cast<std::uintptr_t>(texture->rendererTexture),sizeof(void*))) return;
+    auto* view=*reinterpret_cast<ID3D11ShaderResourceView* const*>(texture->rendererTexture);
+    if (!view || !IsReadableSpan(reinterpret_cast<std::uintptr_t>(view),sizeof(void*))) return;
+    const auto* table=*reinterpret_cast<const std::uintptr_t* const*>(view);
+    if (!IsReadableSpan(reinterpret_cast<std::uintptr_t>(table),9*sizeof(std::uintptr_t))) return;
+    for (unsigned i: {0u,1u,2u,3u,4u,5u,7u,8u}) if (!IsExecutableAddress(table[i])) return;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> owner;
+    if (FAILED(view->QueryInterface(IID_PPV_ARGS(owner.GetAddressOf()))) ||
+        RealisticReflections::Interop::IsOwned(owner.Get()) ||
+        RealisticReflections::Interop::IsPeerReplacement(owner.Get())) return;
+    D3D11_SHADER_RESOURCE_VIEW_DESC v{}; owner->GetDesc(&v);
+    const bool cube=v.ViewDimension==D3D11_SRV_DIMENSION_TEXTURECUBE;
+    const bool oneArrayCube=v.ViewDimension==D3D11_SRV_DIMENSION_TEXTURECUBEARRAY && v.TextureCubeArray.NumCubes==1;
+    if ((!cube && !oneArrayCube) || !UniversalFloatSampleFormat(v.Format)) {
+        static std::atomic_bool reported{false};
+        if (g_diagnosticsEnabled.load(std::memory_order_relaxed) && !reported.exchange(true,std::memory_order_relaxed)) LogDiagnostic([&] {
+            return "CELL FALLBACK: existing named view rejected; dimension="+std::to_string(unsigned(v.ViewDimension))+
+                " format="+std::to_string(unsigned(v.Format))+" cubes="+
+                std::to_string(v.ViewDimension==D3D11_SRV_DIMENSION_TEXTURECUBEARRAY?v.TextureCubeArray.NumCubes:0)+
+                "; one exact sampleable cube is required.";
+        });
+        return;
+    }
+    Microsoft::WRL::ComPtr<ID3D11Resource> resource; owner->GetResource(resource.GetAddressOf());
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> data;
+    if (!resource || FAILED(resource.As(&data))) return;
+    D3D11_TEXTURE2D_DESC d{}; data->GetDesc(&d);
+    const UINT firstFace=cube?0:v.TextureCubeArray.First2DArrayFace;
+    const UINT firstMip=cube?v.TextureCube.MostDetailedMip:v.TextureCubeArray.MostDetailedMip;
+    const UINT mips=cube?v.TextureCube.MipLevels:v.TextureCubeArray.MipLevels;
+    if (!d.Width || d.Width!=d.Height || d.SampleDesc.Count!=1 ||
+        !(d.MiscFlags&D3D11_RESOURCE_MISC_TEXTURECUBE) || !(d.BindFlags&D3D11_BIND_SHADER_RESOURCE) ||
+        (d.BindFlags&(D3D11_BIND_RENDER_TARGET|D3D11_BIND_DEPTH_STENCIL|D3D11_BIND_UNORDERED_ACCESS)) ||
+        firstFace%6 || firstFace>d.ArraySize || d.ArraySize-firstFace<6 ||
+        firstMip>=d.MipLevels || !mips || (mips!=UINT_MAX && mips>d.MipLevels-firstMip) ||
+        (scope.texture && scope.texture.Get()!=data.Get())) return;
+    auto* renderer=RE::BSGraphics::GetRendererData();
+    Microsoft::WRL::ComPtr<ID3D11Device> device; data->GetDevice(device.GetAddressOf());
+    if (!renderer || !renderer->device || device.Get()!=reinterpret_cast<ID3D11Device*>(renderer->device)) return;
+    scope.texture=data; scope.view=owner;
+    LogDiagnostic([] { return "CELL FALLBACK: existing named single-cube SRV acquired on verified OG/NG route; pixel validation pending."; });
+}
+
+// RUNTIMECOMPAT END
 void CellFallbackLoadHook(void* self,RE::NiTexture* texture)
 {
     // Observe engine loads even while disabled so later MCM enable has a reference.
     const int kind=NamedFallbackKind(texture);
     if (!kind || !EnsureCellFallbackDeviceHooks()) { g_originalCellFallbackLoad(self,texture); return; }
+    FallbackNotificationScope notification("LoadTexture");
     CellFallbackLoadScope scope{}; scope.kind=kind; auto* prior=g_cellFallbackScope; g_cellFallbackScope=&scope;
-    g_originalCellFallbackLoad(self,texture); g_cellFallbackScope=prior; SubmitCellFallback(scope,"LoadTexture");
+    g_originalCellFallbackLoad(self,texture);
+// RUNTIMECOMPAT BEGIN
+    AdoptLegacyNamedView(texture,scope);
+// RUNTIMECOMPAT END
+    g_cellFallbackScope=prior; SubmitCellFallback(scope,"LoadTexture");
 }
 bool CellFallbackReadHook(void* self,RE::NiTexture* texture,void* userData)
 {
     // Streaming may load the reference only once during a disabled session.
     const int kind=NamedFallbackKind(texture);
     if (!kind || !EnsureCellFallbackDeviceHooks()) return g_originalCellFallbackRead(self,texture,userData);
+    FallbackNotificationScope notification("ReadStreamingTextureData");
     CellFallbackLoadScope scope{}; scope.kind=kind; auto* prior=g_cellFallbackScope; g_cellFallbackScope=&scope;
     const bool result=g_originalCellFallbackRead(self,texture,userData); g_cellFallbackScope=prior;
+// RUNTIMECOMPAT BEGIN
+    if (result) AdoptLegacyNamedView(texture,scope);
+// RUNTIMECOMPAT END
     if (result) SubmitCellFallback(scope,"ReadStreamingTextureData"); return result;
+}
+
+// Reuse the existing named-resource capture scope for the remaining native routes.
+template<class Call> decltype(auto) ObserveStreamingRoute(RE::NiTexture* texture,const char* route,Call&& call)
+{
+    if (!NamedFallbackKind(texture) || !EnsureCellFallbackDeviceHooks()) return call();
+    FallbackNotificationScope notification(route);
+    CellFallbackLoadScope scope{}; scope.kind=1;
+    struct RestoreScope {
+        CellFallbackLoadScope* prior;
+// RUNTIMECOMPAT BEGIN
+        CellFallbackLoadScope& scope;
+        const char* route;
+        RE::NiTexture* texture;
+        ~RestoreScope() { AdoptLegacyNamedView(texture,scope); g_cellFallbackScope=prior; if(scope.view) SubmitCellFallback(scope,route); }
+    } restore{g_cellFallbackScope,scope,route,texture};
+// RUNTIMECOMPAT END
+
+    g_cellFallbackScope=&scope;
+    return call();
+}
+using CreateStreaming_t=void(*)(void*,RE::NiTexture*,const void* input,void* output);
+CreateStreaming_t g_originalCreateStreaming=nullptr;
+void CreateStreamingHook(void* self,RE::NiTexture* texture,const void* input,void* output) {
+    return ObserveStreamingRoute(texture,"CreateStreaming",[&]() -> void { return g_originalCreateStreaming(self,texture,input,output); });
+}
+using CreateArraySlice_t=bool(*)(void*,RE::NiTexture*,const void* input,void* output,std::uint32_t slice);
+CreateArraySlice_t g_originalCreateArraySlice=nullptr;
+bool CreateArraySliceHook(void* self,RE::NiTexture* texture,const void* input,void* output,std::uint32_t slice) {
+    return ObserveStreamingRoute(texture,"CreateArraySlice",[&]() -> bool { return g_originalCreateArraySlice(self,texture,input,output,slice); });
+}
+using ReadArraySlice_t=bool(*)(void*,RE::NiTexture*,void* input,std::uint32_t slice);
+ReadArraySlice_t g_originalReadArraySlice=nullptr;
+bool ReadArraySliceHook(void* self,RE::NiTexture* texture,void* input,std::uint32_t slice) {
+    return ObserveStreamingRoute(texture,"ReadArraySlice",[&]() -> bool { return g_originalReadArraySlice(self,texture,input,slice); });
+}
+using FinishStreaming_t=void(*)(void*,RE::NiTexture*);
+FinishStreaming_t g_originalFinishStreaming=nullptr;
+void FinishStreamingHook(void* self,RE::NiTexture* texture) {
+    return ObserveStreamingRoute(texture,"FinishStreaming",[&]() -> void { return g_originalFinishStreaming(self,texture); });
+}
+// AE240 native Update* methods compare these same unsigned degrade levels
+// before any upload/replacement. Equal levels take their no-op branch.
+bool NativeMipChangeRequested(RE::NiTexture* texture)
+{
+    if(!texture || !texture->rendererTexture) return true;
+    const auto current=*reinterpret_cast<const std::uint8_t*>(reinterpret_cast<const char*>(texture->rendererTexture)+0x3d);
+    return current!=static_cast<std::uint8_t>(texture->desiredDegradeLevel);
+}
+using UpdateMip_t=bool(*)(void*,RE::NiTexture*,std::uint32_t* level);
+UpdateMip_t g_originalUpdateMip=nullptr;
+bool UpdateMipHook(void* self,RE::NiTexture* texture,std::uint32_t* level) {
+    if(!NativeMipChangeRequested(texture)) return g_originalUpdateMip(self,texture,level);
+    return ObserveStreamingRoute(texture,"UpdateMip",[&]() -> bool { return g_originalUpdateMip(self,texture,level); });
+}
+using LoadUpgrade_t=void(*)(void*,RE::NiTexture*);
+LoadUpgrade_t g_originalLoadUpgrade=nullptr;
+void LoadUpgradeHook(void* self,RE::NiTexture* texture) {
+    return ObserveStreamingRoute(texture,"LoadUpgrade",[&]() -> void { return g_originalLoadUpgrade(self,texture); });
+}
+using UpdateStreamingMip_t=bool(*)(void*,RE::NiTexture*,std::uint32_t* level,void* input,void* output);
+UpdateStreamingMip_t g_originalUpdateStreamingMip=nullptr;
+bool UpdateStreamingMipHook(void* self,RE::NiTexture* texture,std::uint32_t* level,void* input,void* output) {
+    if(!NativeMipChangeRequested(texture)) return g_originalUpdateStreamingMip(self,texture,level,input,output);
+    return ObserveStreamingRoute(texture,"UpdateStreamingMip",[&]() -> bool { return g_originalUpdateStreamingMip(self,texture,level,input,output); });
+}
+using FinishUpgrade_t=void(*)(void*,RE::NiTexture*);
+FinishUpgrade_t g_originalFinishUpgrade=nullptr;
+void FinishUpgradeHook(void* self,RE::NiTexture* texture) {
+    return ObserveStreamingRoute(texture,"FinishUpgrade",[&]() -> void { return g_originalFinishUpgrade(self,texture); });
+}
+#include "KnownTextureLoad.h"
+
+bool InstallStreamingCacheRoutes(const std::uintptr_t* table)
+{
+    const auto base=reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
+// RUNTIMECOMPAT BEGIN
+    if (IsLegacyRuntime()) {
+        if (!VerifyLegacyStreamingRoutes(table)) return false;
+    } else {
+// RUNTIMECOMPAT END
+    if(g_runtimeVersion!="1.11.240.0") { Log("TINT CACHE VERIFY: runtime mismatch: "+g_runtimeVersion); return false; }
+    if(!IsReadableSpan(reinterpret_cast<std::uintptr_t>(table),40*sizeof(std::uintptr_t))) { Log("TINT CACHE VERIFY: unreadable vtable span."); return false; }
+    constexpr std::uint8_t bytesLoad[]={0x48,0x89,0x5c,0x24,0x8,0x57,0x48,0x83,0xec,0x60,0x48,0x8b,0xda,0x48,0x8d,0x4c};
+    const bool nativeLoad=table[26]==base+0x22763e0 && MatchAE240Bytes(table[26],bytesLoad);
+    const bool addictolLoad=!nativeLoad && IsKnownAddictolLoad(table[26],base);
+    if(!nativeLoad && !addictolLoad) {
+        Log("TINT CACHE VERIFY: Load slot=26 actual="+Ptr(reinterpret_cast<const void*>(table[26]))+
+            " expected="+Ptr(reinterpret_cast<const void*>(base+0x22763e0))+" bytes="+ProbeBytes(table[26],sizeof(bytesLoad)));
+        return false;
+    }
+    if(addictolLoad) Log("TINT CACHE VERIFY: Addictol 1.7.0 Texture Load Crash replacement verified; preserving chained load observer.");
+    constexpr std::uint8_t bytesRead[]={0x48,0x8b,0x52,0x38,0x48,0x85,0xd2,0x74,0xc,0x48,0x8d,0xd,0xa0,0xf7,0x7a,0x1};
+    if(table[28]!=base+0x2276550 || !MatchAE240Bytes(table[28],bytesRead)) {
+        Log("TINT CACHE VERIFY: Read slot=28 actual="+Ptr(reinterpret_cast<const void*>(table[28]))+
+            " expected="+Ptr(reinterpret_cast<const void*>(base+0x2276550))+" bytes="+ProbeBytes(table[28],sizeof(bytesRead)));
+        return false;
+    }
+    constexpr std::uint8_t bytesCreateStreaming[]={0x48,0x89,0x5c,0x24,0x8,0x48,0x89,0x74,0x24,0x10,0x57,0x48,0x83,0xec,0x30,0x48};
+    if(table[27]!=base+0x22764c0 || !MatchAE240Bytes(table[27],bytesCreateStreaming)) {
+        Log("TINT CACHE VERIFY: CreateStreaming slot=27 actual="+Ptr(reinterpret_cast<const void*>(table[27]))+
+            " expected="+Ptr(reinterpret_cast<const void*>(base+0x22764c0))+" bytes="+ProbeBytes(table[27],sizeof(bytesCreateStreaming)));
+        return false;
+    }
+    constexpr std::uint8_t bytesCreateArraySlice[]={0x48,0x89,0x5c,0x24,0x8,0x48,0x89,0x74,0x24,0x10,0x57,0x48,0x83,0xec,0x30,0x48};
+    if(table[29]!=base+0x2276570 || !MatchAE240Bytes(table[29],bytesCreateArraySlice)) {
+        Log("TINT CACHE VERIFY: CreateArraySlice slot=29 actual="+Ptr(reinterpret_cast<const void*>(table[29]))+
+            " expected="+Ptr(reinterpret_cast<const void*>(base+0x2276570))+" bytes="+ProbeBytes(table[29],sizeof(bytesCreateArraySlice)));
+        return false;
+    }
+    constexpr std::uint8_t bytesReadArraySlice[]={0x48,0x8b,0x52,0x38,0x48,0x85,0xd2,0x74,0xc,0x48,0x8d,0xd,0xf0,0xf6,0x7a,0x1};
+    if(table[30]!=base+0x2276600 || !MatchAE240Bytes(table[30],bytesReadArraySlice)) {
+        Log("TINT CACHE VERIFY: ReadArraySlice slot=30 actual="+Ptr(reinterpret_cast<const void*>(table[30]))+
+            " expected="+Ptr(reinterpret_cast<const void*>(base+0x2276600))+" bytes="+ProbeBytes(table[30],sizeof(bytesReadArraySlice)));
+        return false;
+    }
+    constexpr std::uint8_t bytesFinishStreaming[]={0x48,0x89,0x5c,0x24,0x8,0x57,0x48,0x83,0xec,0x20,0x48,0x8b,0x7a,0x38,0x48,0x8b};
+    if(table[31]!=base+0x2276620 || !MatchAE240Bytes(table[31],bytesFinishStreaming)) {
+        Log("TINT CACHE VERIFY: FinishStreaming slot=31 actual="+Ptr(reinterpret_cast<const void*>(table[31]))+
+            " expected="+Ptr(reinterpret_cast<const void*>(base+0x2276620))+" bytes="+ProbeBytes(table[31],sizeof(bytesFinishStreaming)));
+        return false;
+    }
+    constexpr std::uint8_t bytesUpdateMip[]={0x48,0x89,0x5c,0x24,0x18,0x55,0x56,0x57,0x48,0x83,0xec,0x30,0x48,0x8b,0x6a,0x38};
+    if(table[36]!=base+0x2276730 || !MatchAE240Bytes(table[36],bytesUpdateMip)) {
+        Log("TINT CACHE VERIFY: UpdateMip slot=36 actual="+Ptr(reinterpret_cast<const void*>(table[36]))+
+            " expected="+Ptr(reinterpret_cast<const void*>(base+0x2276730))+" bytes="+ProbeBytes(table[36],sizeof(bytesUpdateMip)));
+        return false;
+    }
+    constexpr std::uint8_t bytesLoadUpgrade[]={0x40,0x53,0x48,0x83,0xec,0x50,0x48,0x8b,0xda,0x48,0x83,0xc2,0x30,0x48,0x83,0x3a};
+    if(table[37]!=base+0x2276830 || !MatchAE240Bytes(table[37],bytesLoadUpgrade)) {
+        Log("TINT CACHE VERIFY: LoadUpgrade slot=37 actual="+Ptr(reinterpret_cast<const void*>(table[37]))+
+            " expected="+Ptr(reinterpret_cast<const void*>(base+0x2276830))+" bytes="+ProbeBytes(table[37],sizeof(bytesLoadUpgrade)));
+        return false;
+    }
+    constexpr std::uint8_t bytesUpdateStreamingMip[]={0x4c,0x8b,0xdc,0x49,0x89,0x5b,0x8,0x49,0x89,0x6b,0x18,0x49,0x89,0x73,0x20,0x57};
+    if(table[38]!=base+0x2276890 || !MatchAE240Bytes(table[38],bytesUpdateStreamingMip)) {
+        Log("TINT CACHE VERIFY: UpdateStreamingMip slot=38 actual="+Ptr(reinterpret_cast<const void*>(table[38]))+
+            " expected="+Ptr(reinterpret_cast<const void*>(base+0x2276890))+" bytes="+ProbeBytes(table[38],sizeof(bytesUpdateStreamingMip)));
+        return false;
+    }
+    constexpr std::uint8_t bytesFinishUpgrade[]={0x40,0x53,0x48,0x83,0xec,0x20,0x48,0x8b,0xda,0x48,0x8b,0x52,0x38,0x48,0x85,0xd2};
+    if(table[39]!=base+0x22769b0 || !MatchAE240Bytes(table[39],bytesFinishUpgrade)) {
+        Log("TINT CACHE VERIFY: FinishUpgrade slot=39 actual="+Ptr(reinterpret_cast<const void*>(table[39]))+
+            " expected="+Ptr(reinterpret_cast<const void*>(base+0x22769b0))+" bytes="+ProbeBytes(table[39],sizeof(bytesFinishUpgrade)));
+        return false;
+    }
+// RUNTIMECOMPAT BEGIN
+    }
+// RUNTIMECOMPAT END
+    Log("TINT CACHE VERIFY: all ten streaming entrypoints passed (native or exact reviewed Addictol load).");
+    LONG error=DetourTransactionBegin();
+    if(error!=NO_ERROR) { Log("TINT CACHE INSTALL: begin error="+std::to_string(error)); return false; }
+    error=DetourUpdateThread(GetCurrentThread());
+    if(error!=NO_ERROR) { Log("TINT CACHE INSTALL: update thread error="+std::to_string(error)); DetourTransactionAbort(); return false; }
+    g_originalCreateStreaming=reinterpret_cast<CreateStreaming_t>(table[27]);
+    error=DetourAttach(reinterpret_cast<PVOID*>(&g_originalCreateStreaming),reinterpret_cast<PVOID>(CreateStreamingHook));
+    if(error!=NO_ERROR) { Log("TINT CACHE INSTALL: CreateStreaming attach error="+std::to_string(error)); DetourTransactionAbort(); return false; }
+    g_originalCreateArraySlice=reinterpret_cast<CreateArraySlice_t>(table[29]);
+    error=DetourAttach(reinterpret_cast<PVOID*>(&g_originalCreateArraySlice),reinterpret_cast<PVOID>(CreateArraySliceHook));
+    if(error!=NO_ERROR) { Log("TINT CACHE INSTALL: CreateArraySlice attach error="+std::to_string(error)); DetourTransactionAbort(); return false; }
+    g_originalReadArraySlice=reinterpret_cast<ReadArraySlice_t>(table[30]);
+    error=DetourAttach(reinterpret_cast<PVOID*>(&g_originalReadArraySlice),reinterpret_cast<PVOID>(ReadArraySliceHook));
+    if(error!=NO_ERROR) { Log("TINT CACHE INSTALL: ReadArraySlice attach error="+std::to_string(error)); DetourTransactionAbort(); return false; }
+    g_originalFinishStreaming=reinterpret_cast<FinishStreaming_t>(table[31]);
+    error=DetourAttach(reinterpret_cast<PVOID*>(&g_originalFinishStreaming),reinterpret_cast<PVOID>(FinishStreamingHook));
+    if(error!=NO_ERROR) { Log("TINT CACHE INSTALL: FinishStreaming attach error="+std::to_string(error)); DetourTransactionAbort(); return false; }
+    g_originalUpdateMip=reinterpret_cast<UpdateMip_t>(table[36]);
+    error=DetourAttach(reinterpret_cast<PVOID*>(&g_originalUpdateMip),reinterpret_cast<PVOID>(UpdateMipHook));
+    if(error!=NO_ERROR) { Log("TINT CACHE INSTALL: UpdateMip attach error="+std::to_string(error)); DetourTransactionAbort(); return false; }
+    g_originalLoadUpgrade=reinterpret_cast<LoadUpgrade_t>(table[37]);
+    error=DetourAttach(reinterpret_cast<PVOID*>(&g_originalLoadUpgrade),reinterpret_cast<PVOID>(LoadUpgradeHook));
+    if(error!=NO_ERROR) { Log("TINT CACHE INSTALL: LoadUpgrade attach error="+std::to_string(error)); DetourTransactionAbort(); return false; }
+    g_originalUpdateStreamingMip=reinterpret_cast<UpdateStreamingMip_t>(table[38]);
+    error=DetourAttach(reinterpret_cast<PVOID*>(&g_originalUpdateStreamingMip),reinterpret_cast<PVOID>(UpdateStreamingMipHook));
+    if(error!=NO_ERROR) { Log("TINT CACHE INSTALL: UpdateStreamingMip attach error="+std::to_string(error)); DetourTransactionAbort(); return false; }
+    g_originalFinishUpgrade=reinterpret_cast<FinishUpgrade_t>(table[39]);
+    error=DetourAttach(reinterpret_cast<PVOID*>(&g_originalFinishUpgrade),reinterpret_cast<PVOID>(FinishUpgradeHook));
+    if(error!=NO_ERROR) { Log("TINT CACHE INSTALL: FinishUpgrade attach error="+std::to_string(error)); DetourTransactionAbort(); return false; }
+    if(error!=NO_ERROR) { DetourTransactionAbort(); return false; }
+    PVOID* failed=nullptr;
+    error=DetourTransactionCommitEx(&failed);
+    if(error!=NO_ERROR) {
+        const char* route="unknown";
+        if(failed==reinterpret_cast<PVOID*>(&g_originalCreateStreaming)) route="CreateStreaming";
+        if(failed==reinterpret_cast<PVOID*>(&g_originalCreateArraySlice)) route="CreateArraySlice";
+        if(failed==reinterpret_cast<PVOID*>(&g_originalReadArraySlice)) route="ReadArraySlice";
+        if(failed==reinterpret_cast<PVOID*>(&g_originalFinishStreaming)) route="FinishStreaming";
+        if(failed==reinterpret_cast<PVOID*>(&g_originalUpdateMip)) route="UpdateMip";
+        if(failed==reinterpret_cast<PVOID*>(&g_originalLoadUpgrade)) route="LoadUpgrade";
+        if(failed==reinterpret_cast<PVOID*>(&g_originalUpdateStreamingMip)) route="UpdateStreamingMip";
+        if(failed==reinterpret_cast<PVOID*>(&g_originalFinishUpgrade)) route="FinishUpgrade";
+        Log("TINT CACHE INSTALL: commit route="+std::string(route)+" error="+std::to_string(error));
+    }
+    return error==NO_ERROR;
 }
 bool InstallCellFallbackHooks()
 {
@@ -1832,6 +2356,11 @@ bool InstallCellFallbackHooks()
     if (!IsReadableSpan(address + 26*sizeof(std::uintptr_t),3*sizeof(std::uintptr_t))) return false;
     auto* table=reinterpret_cast<std::uintptr_t*>(address);
     if (!CellFallbackExecutable(reinterpret_cast<void*>(table[26])) || !CellFallbackExecutable(reinterpret_cast<void*>(table[28]))) return false;
+    g_streamingRoutesVerified=InstallStreamingCacheRoutes(table);
+// RUNTIMECOMPAT BEGIN
+    Log(g_streamingRoutesVerified ? "TINT CACHE: "+g_runtimeVersion+" streaming routes verified and installed; source-epoch caching available." : "TINT CACHE: streaming coverage unverified; retaining periodic probes.");
+// RUNTIMECOMPAT END
+
     g_originalCellFallbackLoad=reinterpret_cast<CellFallbackLoad_t>(table[26]);
     g_originalCellFallbackRead=reinterpret_cast<CellFallbackRead_t>(table[28]);
     LONG error=DetourTransactionBegin();
@@ -1840,6 +2369,7 @@ bool InstallCellFallbackHooks()
     if (error==NO_ERROR) error=DetourAttach(reinterpret_cast<PVOID*>(&g_originalCellFallbackRead),reinterpret_cast<PVOID>(CellFallbackReadHook));
     if (error!=NO_ERROR) { DetourTransactionAbort(); return false; }
     error=DetourTransactionCommit();
+    if(error!=NO_ERROR) g_streamingRoutesVerified=false;
     if (error==NO_ERROR) Log("CELL FALLBACK: LoadTexture and ReadStreamingTextureData hooks installed.");
     return error==NO_ERROR;
 }
@@ -1859,7 +2389,7 @@ bool UpdateCellFallbackKind()
     const int kind=g_sampledCellKind.load();
     if (!kind || kind==g_activeCellKind) return false;
     g_activeCellKind=kind;
-    Log(kind==2?"CELL FALLBACK: interior selected (internal dark brown).":"CELL FALLBACK: exterior selected (mipblur_DefaultOutside1.dds).");
+    Log(kind==2?"CELL: interior capture selected.":"CELL: exterior capture selected.");
     return true;
 }
 Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> AcquireNamedCellFallback()
@@ -1890,6 +2420,120 @@ TintProbeResult g_exteriorReference{};
 Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> g_exteriorReferenceView;
 bool g_exteriorReferenceValid=false, g_tintProbePendingExterior=false;
 ULONGLONG g_exteriorReferenceNext=0;
+bool g_exteriorReferenceImmutable=false;
+bool g_exteriorReferenceEventCache=false;
+uint64_t g_exteriorReferenceSourceEpoch=0;
+ULONGLONG g_cacheNextReport=0;
+uint64_t g_cacheSkipped=0;
+uint64_t g_probeNotificationEpoch=0;
+bool g_probeNotificationQuiet=false;
+Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> g_auditReferenceView;
+TintProbeResult g_auditReferenceValue{};
+uint64_t g_auditReferenceEpoch=0;
+ULONGLONG g_auditNextReport=0;
+UINT g_auditStable=0,g_auditMissed=0,g_auditNotified=0,g_auditInconclusive=0;
+
+void AuditReferenceNotification(const TintProbeResult& value,ID3D11ShaderResourceView* view)
+{
+    const auto epoch=g_fallbackNotificationEpoch.load();
+    if (!g_probeNotificationQuiet || g_fallbackNotificationActive.load()!=0 || epoch!=g_probeNotificationEpoch) {
+        ++g_auditInconclusive;
+        g_auditReferenceView.Reset();
+    } else {
+        if (g_auditReferenceView.Get()==view) {
+            const bool changed=std::memcmp(&value,&g_auditReferenceValue,sizeof(value))!=0;
+            if (changed && epoch==g_auditReferenceEpoch) {
+                ++g_auditMissed;
+                LogDiagnostic([&] { return "STREAM AUDIT: sampled reference changed WITHOUT observed load/read notification; mutable cache remains unsafe."; });
+            } else if (changed) {
+                ++g_auditNotified;
+                LogDiagnostic([&] { return "STREAM AUDIT: sampled reference changed across observed notification."; });
+            } else ++g_auditStable;
+        }
+        g_auditReferenceView=view; g_auditReferenceValue=value; g_auditReferenceEpoch=epoch;
+    }
+    const auto now=GetTickCount64();
+    if (now>=g_auditNextReport) {
+        g_auditNextReport=now+30000;
+        LogDiagnostic([&] { return "STREAM AUDIT: stable="+std::to_string(g_auditStable)+" changedWithNotification="+std::to_string(g_auditNotified)+
+            " changedWithoutNotification="+std::to_string(g_auditMissed)+" overlapping="+std::to_string(g_auditInconclusive)+
+            "; sampled comparisons; source-epoch cache applies only to verified native file textures."; });
+    }
+}
+
+
+bool IsImmutableTintSource(ID3D11ShaderResourceView* view)
+{
+    if (!view) return false;
+    Microsoft::WRL::ComPtr<ID3D11Resource> resource;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
+    view->GetResource(resource.GetAddressOf());
+    if (!resource || FAILED(resource.As(&texture))) return false;
+    D3D11_TEXTURE2D_DESC desc{};
+    texture->GetDesc(&desc);
+    return desc.Usage==D3D11_USAGE_IMMUTABLE;
+}
+
+bool IsEventCacheableTintSource(ID3D11ShaderResourceView* view)
+{
+    if (!g_streamingRoutesVerified || !view) return false;
+    Microsoft::WRL::ComPtr<ID3D11Resource> resource;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
+    view->GetResource(resource.GetAddressOf());
+    if(!resource || FAILED(resource.As(&texture))) return false;
+    D3D11_TEXTURE2D_DESC desc{}; texture->GetDesc(&desc);
+    return desc.Usage==D3D11_USAGE_DEFAULT && desc.CPUAccessFlags==0 &&
+        desc.BindFlags==D3D11_BIND_SHADER_RESOURCE && !(desc.MiscFlags&D3D11_RESOURCE_MISC_GENERATE_MIPS);
+}
+
+bool TintProbeEpochCurrent(bool quiet,uint64_t submitted,uint64_t current,unsigned active)
+{
+    return quiet && submitted==current && active==0;
+}
+
+bool TintReferenceNeedsProbe(bool valid, bool immutable)
+{
+    return !valid || !immutable;
+}
+
+#include "ArrayWriteTracking.h"
+
+// The same reviewed write epochs used by tint caching also guard static output.
+std::unordered_map<ID3D11ShaderResourceView*,ArrayWrites::Stamp> g_retainedPoolSources;
+bool CanReuseRetainedPoolSource(ID3D11ShaderResourceView* view)
+{
+    if (!g_streamingRoutesVerified || !ArrayWrites::installed ||
+        g_liveContext!=ArrayWrites::installedContext || !view) return false;
+    const auto cached=ArrayWrites::cached.find(view);
+    const auto published=g_retainedPoolSources.find(view);
+    return cached!=ArrayWrites::cached.end() && published!=g_retainedPoolSources.end() &&
+        ArrayWrites::Current(cached->second) && ArrayWrites::Current(published->second);
+}
+void CommitRetainedPoolSource(ID3D11ShaderResourceView* view)
+{
+    if (!view) return;
+    const auto cached=ArrayWrites::cached.find(view);
+    if (g_streamingRoutesVerified && ArrayWrites::installed &&
+        g_liveContext==ArrayWrites::installedContext && cached!=ArrayWrites::cached.end() &&
+        ArrayWrites::Current(cached->second)) g_retainedPoolSources.insert_or_assign(view,cached->second);
+    else g_retainedPoolSources.erase(view);
+}
+void ReportPoolWork()
+{
+    if (!g_diagnosticsEnabled) return;
+    static ULONGLONG next=0;
+    const auto now=GetTickCount64(); if(now<next) return; next=now+30000;
+    UINT total=0,updated=0;
+    for (const auto& pool:g_universalPools) {
+        if (!pool.texture || pool.failed) continue;
+        total+=pool.cubes; updated+=pool.lastUpdatedCubes;
+    }
+    LogDiagnostic([&] { return "POOL WORK: totalCubes="+std::to_string(total)+
+        " updatedCubes="+std::to_string(updated)+" retainedCubesReused="+std::to_string(total-updated)+
+        " fullChain=1 safety=verified-analysis-and-published-write-epochs"; });
+}
+ArrayWrites::Stamp g_arrayProbeStamp;
+bool g_arrayProbeTracked=false;
 Microsoft::WRL::ComPtr<ID3D11ComputeShader> g_tintProbeCS;
 Microsoft::WRL::ComPtr<ID3D11Buffer> g_tintProbeOutput, g_tintProbeReadback;
 Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> g_tintProbeUAV;
@@ -2043,33 +2687,30 @@ bool EnsureTintProbe(ID3D11Device* device)
         Log(std::string("TINT FAIL: initialization at ")+stage);
         return false;
     };
-    Microsoft::WRL::ComPtr<ID3DBlob> code,errors;
-    const HRESULT compileHr=D3DCompile(kTintProbeShader,strlen(kTintProbeShader),"DCF4TintProbe",nullptr,nullptr,
-        "main","cs_5_0",D3DCOMPILE_ENABLE_STRICTNESS,0,code.GetAddressOf(),errors.GetAddressOf());
-    if (FAILED(compileHr) || !code) {
-        Log(std::string("TINT: compiler HRESULT=")+std::to_string(static_cast<long>(compileHr)));
-        if (errors && errors->GetBufferSize())
-            Log(std::string(static_cast<const char*>(errors->GetBufferPointer()),errors->GetBufferSize()));
-        return fail("shader compilation");
-    }
-    const HRESULT shaderHr=device->CreateComputeShader(code->GetBufferPointer(),code->GetBufferSize(),nullptr,
+    TintTraceStep(TintTrace::Stage::Shader); // TINTTRACE
+    const auto& code=DCF4Shaders::TintProbe;
+    const HRESULT shaderHr=device->CreateComputeShader(code.data,code.size,nullptr,
         g_tintProbeCS.GetAddressOf());
     if (FAILED(shaderHr)) {
         Log(std::string("TINT: CreateComputeShader HRESULT=")+std::to_string(static_cast<long>(shaderHr)));
         return fail("shader creation");
     }
+    TintTraceStep(TintTrace::Stage::OutputBuffer); // TINTTRACE
     D3D11_BUFFER_DESC d{}; d.ByteWidth=sizeof(TintProbeResult)*128; d.Usage=D3D11_USAGE_DEFAULT;
     d.BindFlags=D3D11_BIND_UNORDERED_ACCESS; d.MiscFlags=D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
     d.StructureByteStride=kTintProbeElementBytes;
     if (FAILED(device->CreateBuffer(&d,nullptr,g_tintProbeOutput.GetAddressOf()))) return fail("output buffer");
+    TintTraceStep(TintTrace::Stage::OutputUAV); // TINTTRACE
     D3D11_UNORDERED_ACCESS_VIEW_DESC u{}; u.Format=DXGI_FORMAT_UNKNOWN; u.ViewDimension=D3D11_UAV_DIMENSION_BUFFER;
     u.Buffer.NumElements=128*kTintProbeElementsPerCube;
     if (FAILED(device->CreateUnorderedAccessView(g_tintProbeOutput.Get(),&u,g_tintProbeUAV.GetAddressOf()))) return fail("output UAV");
+    TintTraceStep(TintTrace::Stage::ReadbackBuffer); // TINTTRACE
     d.Usage=D3D11_USAGE_STAGING; d.BindFlags=0; d.CPUAccessFlags=D3D11_CPU_ACCESS_READ; d.MiscFlags=0;
     if (FAILED(device->CreateBuffer(&d,nullptr,g_tintProbeReadback.GetAddressOf()))) return fail("readback buffer");
+    TintTraceStep(TintTrace::Stage::Query); // TINTTRACE
     D3D11_QUERY_DESC q{}; q.Query=D3D11_QUERY_EVENT;
     if (FAILED(device->CreateQuery(&q,g_tintProbeQuery.GetAddressOf()))) return fail("completion query");
-    Log("TINT: automatic coarse-mip analyzer ready."); return true;
+    LogDiagnostic([&] { return "TINT: automatic coarse-mip analyzer ready."; }); return true;
 }
 
 bool IsExteriorFallbackView(ID3D11ShaderResourceView* view)
@@ -2219,9 +2860,9 @@ bool RecoverNamedFallback(ID3D11Device* device, std::string& failure,
         std::lock_guard lock(g_cellFallbackMutex);
         if(!g_namedCellFallback[0]) g_namedCellFallback[0]=view;
     }
-    Log("FALLBACK: named resource reopened; size="+std::to_string(width)+" mips="+std::to_string(mips)+
+    LogDiagnostic([&] { return "FALLBACK: named resource reopened; size="+std::to_string(width)+" mips="+std::to_string(mips)+
         " fileFormat="+std::to_string(static_cast<UINT>(fileFormat))+
-        " sampleFormat="+std::to_string(static_cast<UINT>(format)));
+        " sampleFormat="+std::to_string(static_cast<UINT>(format)); });
     return true;
 }
 void RecoverNamedFallbackTick(ID3D11Device* device)
@@ -2234,29 +2875,71 @@ void RecoverNamedFallbackTick(ID3D11Device* device)
     if(!RecoverNamedFallback(device,failure)) {
         ++attempts;
         if(attempts==1 || attempts%6==0)
-            Log("FALLBACK: recovery pending: "+failure+"; original bindings retained until reference is ready.");
+            LogRecoveryDiagnostic(failure, [&] { return "FALLBACK: recovery pending: "+failure+"; original bindings retained until reference is ready."; });
     }
 }
 
 void TintAnalysisTick(ID3D11Device* device)
 {
+    // TINTTRACE BEGIN
+    struct TraceTick {
+        const bool enabled=g_diagnosticsEnabled.load(std::memory_order_relaxed);
+        TintTraceRecorder recorder{enabled};
+        TintTraceRecorder* previous=g_tintTraceCurrent;
+        TraceTick() {
+            if(!enabled)return;
+            auto& value=recorder.sample;
+            value.atMs=GetTickCount64()-g_logStart; value.reset=g_tintTraceSummary.generation;
+            value.views=static_cast<unsigned>(g_universalViews.size());
+            value.pools=static_cast<unsigned>(g_universalPools.size());
+            if(g_tintProbePending) {
+                value.pending=g_tintProbePendingCandidate ? TintTrace::Kind::Recovery :
+                    g_tintProbePendingExterior ? TintTrace::Kind::Exterior :
+                    g_tintProbePendingPool==UINT_MAX ? TintTrace::Kind::Direct : TintTrace::Kind::Array;
+                value.pendingPool=g_tintProbePendingPool; value.pendingCubes=g_tintProbePendingCubes;
+            }
+            g_tintTraceCurrent=&recorder;
+        }
+        ~TraceTick() {
+            if(!enabled)return;
+            recorder.Finish();g_tintTraceCurrent=previous;
+            g_tintTraceSummary.Observe(recorder.sample);
+        }
+    } traceTick;
+    // TINTTRACE END
+    TintReportBatch tintReports(traceTick.enabled); // TINTBATCH
     RecoverNamedFallbackTick(device);
+    TintTraceStep(TintTrace::Stage::Resources); // TINTTRACE
     if (!g_liveContext || !EnsureTintProbe(device)) return;
+    TintTraceStep(TintTrace::Stage::Tracking); // TINTTRACE
+    ArrayWrites::Install(g_liveContext);
+    ArrayWrites::Report();
+    TintTraceStep(TintTrace::Stage::SourceSync); // TINTTRACE
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> exteriorView;
     { std::lock_guard lock(g_cellFallbackMutex); exteriorView=g_namedCellFallback[0]; }
-    if (exteriorView.Get()!=g_exteriorReferenceView.Get()) {
+    const auto sourceEpoch=g_fallbackNotificationEpoch.load();
+    if(g_fallbackNotificationActive.load()!=0) return;
+    if (exteriorView.Get()!=g_exteriorReferenceView.Get() || sourceEpoch!=g_exteriorReferenceSourceEpoch) {
+        if(g_tintTraceCurrent)g_tintTraceCurrent->sample.invalidated=true; // TINTTRACE
+        g_exteriorReferenceSourceEpoch=sourceEpoch;
         g_invalidReference={}; g_referenceCandidate.Reset(); g_candidateOriginal.Reset();
         g_namedReferenceReady=false;
-        g_tintProbeDone.clear(); g_tintProbeNext.clear();
+        g_tintProbeDone.clear(); g_tintProbeNext.clear(); ArrayWrites::cached.clear();
         for(auto& [view,entry]:g_universalViews) entry.analyzed=false;
         for(auto& pool:g_universalPools) {
                             pool.exteriorMatchState=-3; pool.ready=false;
                         }
         g_exteriorReferenceView=exteriorView; g_exteriorReferenceValid=false;
+        g_exteriorReferenceImmutable=IsImmutableTintSource(exteriorView.Get());
+        g_exteriorReferenceEventCache=IsEventCacheableTintSource(exteriorView.Get());
+        LogDiagnostic([&] { return std::string("TINT CACHE: exterior source policy=")+
+            (g_exteriorReferenceImmutable ? "immutable; cache after validation." : g_exteriorReferenceEventCache ? "verified native file texture; cache by notification epoch." : "mutable/unknown; retain streaming checks."); });
         g_exteriorReferenceNext=0;
     }
     if (g_tintProbePending) {
+        TintTraceStep(TintTrace::Stage::Completion); // TINTTRACE
         const HRESULT probeStatus=g_liveContext->GetData(g_tintProbeQuery.Get(),nullptr,0,D3D11_ASYNC_GETDATA_DONOTFLUSH);
+        if(g_tintTraceCurrent) { g_tintTraceCurrent->sample.queryPolled=true;g_tintTraceCurrent->sample.queryHr=probeStatus; } // TINTTRACE
         if (probeStatus==S_FALSE) return;
         if (FAILED(probeStatus)) {
             Log("TINT FAIL: completion query HRESULT="+std::to_string(static_cast<long>(probeStatus))+
@@ -2266,8 +2949,20 @@ void TintAnalysisTick(ID3D11Device* device)
             g_tintProbeFailed=true;
             return;
         }
+        TintTraceStep(TintTrace::Stage::EpochCheck); // TINTTRACE
+        if (!TintProbeEpochCurrent(g_probeNotificationQuiet,g_probeNotificationEpoch,g_fallbackNotificationEpoch.load(),g_fallbackNotificationActive.load()) ||
+            (g_arrayProbeTracked && !ArrayWrites::Current(g_arrayProbeStamp))) {
+            g_tintProbePending=false; g_tintProbePendingView.Reset(); g_tintProbeSource.Reset();
+            g_tintProbePendingPool=UINT_MAX; g_tintProbePendingExterior=false;
+            if(g_tintTraceCurrent)g_tintTraceCurrent->sample.stale=true; // TINTTRACE
+            LogDiagnostic([&] { return "TINT CACHE: discarded analysis overlapping source notification; retry pending."; });
+            return;
+        }
+        TintTraceStep(TintTrace::Stage::Map); // TINTTRACE
         D3D11_MAPPED_SUBRESOURCE map{};
 		if (SUCCEEDED(g_liveContext->Map(g_tintProbeReadback.Get(),0,D3D11_MAP_READ,0,&map))) {
+            TintTraceStep(TintTrace::Stage::ReferenceResult); // TINTTRACE
+            if(g_tintTraceCurrent) { g_tintTraceCurrent->sample.mapped=true;g_tintTraceCurrent->sample.processedCubes=g_tintProbePendingCubes; } // TINTTRACE
             const auto* values=static_cast<const TintProbeResult*>(map.pData);
             if (g_tintProbePendingCandidate) {
                 if (g_referenceCandidate && g_tintProbePendingView.Get()==g_referenceCandidate.Get()) {
@@ -2283,47 +2978,55 @@ void TintAnalysisTick(ID3D11Device* device)
                     if (committed) {
                         exteriorView=g_referenceCandidate; g_exteriorReferenceView=exteriorView;
                         g_exteriorReference=values[0]; g_exteriorReferenceValid=true; g_namedReferenceReady=true;
+                        g_exteriorReferenceImmutable=IsImmutableTintSource(exteriorView.Get());
+        g_exteriorReferenceEventCache=IsEventCacheableTintSource(exteriorView.Get());
+                        LogDiagnostic([&] { return std::string("TINT CACHE: recovered reference policy=")+
+                            (g_exteriorReferenceImmutable ? "immutable; validated result cached." : "mutable/unknown; retain streaming checks."); });
                         g_exteriorReferenceNext=GetTickCount64()+1000;
-                        g_tintProbeDone.clear(); g_tintProbeNext.clear();
+                        g_tintProbeDone.clear(); g_tintProbeNext.clear(); ArrayWrites::cached.clear();
                         for (auto& [view,entry]:g_universalViews) entry.analyzed=false;
                         for (auto& pool:g_universalPools) { pool.exteriorMatchState=-3; pool.ready=false; }
                         g_invalidReference={};
-                        Log("FALLBACK: validated recovery reference installed; rematching cubemaps.");
+                        LogDiagnostic([&] { return "FALLBACK: validated recovery reference installed; rematching cubemaps."; });
                     } else {
-                        Log(valid ? "FALLBACK: recovery candidate discarded; native reference changed or recovered." :
-                            "FALLBACK: recovery candidate invalid; existing reference retained.");
+                        LogDiagnostic([&] { return valid ? "FALLBACK: recovery candidate discarded; native reference changed or recovered." :
+                            "FALLBACK: recovery candidate invalid; existing reference retained."; });
                     }
                     g_referenceCandidate.Reset(); g_candidateOriginal.Reset();
                 }
             } else if (g_tintProbePendingExterior) {
                 if (g_tintProbePendingView.Get()==g_exteriorReferenceView.Get()) {
+                    AuditReferenceNotification(values[0],g_tintProbePendingView.Get());
                     const bool valid=ExteriorDetailedMatches(values[0],values[0]);
                     g_invalidReference.Observe(valid,GetTickCount64());
                     if (valid) { g_referenceCandidate.Reset(); g_candidateOriginal.Reset(); }
                     if (valid && !g_exteriorReferenceValid) {
-                        g_tintProbeDone.clear(); g_tintProbeNext.clear();
+                        g_tintProbeDone.clear(); g_tintProbeNext.clear(); ArrayWrites::cached.clear();
                         for(auto& [view,entry]:g_universalViews) entry.analyzed=false;
                         for(auto& pool:g_universalPools) {
                             pool.exteriorMatchState=-3; pool.ready=false;
                         }
-                        Log("EXTERIOR MATCH: named reference ready.");
+                        LogDiagnostic([&] { return "EXTERIOR MATCH: named reference ready."; });
+                        if (g_exteriorReferenceImmutable) LogDiagnostic([&] { return "TINT CACHE: validated immutable exterior reference cached until source replacement/reset."; });
                     }
                     g_exteriorReference=values[0]; g_exteriorReferenceValid=valid;
                     g_namedReferenceReady=valid;
                 }
             } else {
+            TintTraceStep(TintTrace::Stage::MaterialMatch); // TINTTRACE
             UINT exteriorMatch=UINT_MAX, matchCount=0;
             if (g_exteriorReferenceValid) {
                 exteriorMatch=FindExteriorMatch(values,g_tintProbePendingCubes,g_exteriorReference,matchCount);
             }
+            TintTraceStep(TintTrace::Stage::MaterialStyle); // TINTTRACE
             if (g_tintProbePendingPool<g_universalPools.size()) {
                 auto& p=g_universalPools[g_tintProbePendingPool];
                 const int state=!g_exteriorReferenceValid ? -3 : matchCount==0 ? -2 : matchCount>1 ? -1 : static_cast<int>(exteriorMatch);
                 if (p.exteriorMatchState!=state) {
                     p.exteriorMatchState=state;
-                    Log("EXTERIOR MATCH: pool="+std::to_string(g_tintProbePendingPool)+
+                    LogDiagnostic([&] { return "EXTERIOR MATCH: pool="+std::to_string(g_tintProbePendingPool)+
                         " match="+std::to_string(state)+" candidates="+std::to_string(matchCount)+
-                        " (-3=reference pending,-2=no detailed match,-1=multiple detailed matches).");
+                        " (-3=reference pending,-2=no detailed match,-1=multiple detailed matches)."; });
                 }
             }
             for (UINT cube=0;cube<g_tintProbePendingCubes;++cube) {
@@ -2386,12 +3089,12 @@ void TintAnalysisTick(ID3D11Device* device)
 						if (usable || exteriorAtlasCube) g_tintProbeDone.insert(g_tintProbePendingView.Get());
 						const float loggedIntensity=authoredIntensity;
 						if (firstAnalysis || (usable && !direct->second.loggedStyledBinding)) {
-							Log(std::string("TINT DIRECT: saturation=")+std::to_string(v.saturation)+
+							LogDiagnostic([&] { return std::string("TINT DIRECT: saturation=")+std::to_string(v.saturation)+
 								" consistency="+std::to_string(v.consistency)+
 								" sourceY="+std::to_string(luminance)+
 								" scale="+std::to_string(loggedIntensity)+" class="+classification+
 								(keepOriginal?"; original binding preserved.":
-									(exteriorAtlasCube?"; exterior tint excluded.":(usable?"; styled standalone cube queued.":"; awaiting streamed data; retry scheduled."))));
+									(exteriorAtlasCube?"; exterior tint excluded.":(usable?"; styled standalone cube queued.":"; awaiting streamed data; retry scheduled."))); });
 						}
 					}
 				} else if (g_tintProbePendingPool<g_universalPools.size() && cube<g_universalPools[g_tintProbePendingPool].cubes) {
@@ -2413,47 +3116,73 @@ void TintAnalysisTick(ID3D11Device* device)
 					pool.style.tint[cube]=newTint;
 					pool.style.intensity[cube]=XMFLOAT4(intensity,0,0,0);
 					if (changed) pool.tintDirty=true;
-					if (changed && (colorful || intensity<0.95f || exteriorAtlasCube || uncertainExterior)) Log(std::string("TINT REFRESH: cube=")+std::to_string(cube)+
+					if (changed && (colorful || intensity<0.95f || exteriorAtlasCube || uncertainExterior)) LogDiagnostic([&] { return std::string("TINT REFRESH: cube=")+std::to_string(cube)+
 						" sourceY="+std::to_string(luminance)+" scale="+std::to_string(intensity)+
-						" class="+classification);
+						" class="+classification; });
 				}
             }
             }
+            TintTraceStep(TintTrace::Stage::CacheCommit); // TINTTRACE
+            if(g_arrayProbeTracked && ArrayWrites::Current(g_arrayProbeStamp)) {
+                bool complete=true;
+                for(UINT cube=0;cube<g_tintProbePendingCubes;++cube) {
+                    const auto& v=values[cube];
+                    const float y=0.2126f*v.r+0.7152f*v.g+0.0722f*v.b;
+                    // Finite empty slots retain their existing original-binding result.
+                    // A later upload invalidates the array through the existing write observer.
+                    if(!std::isfinite(y)) { complete=false; break; }
+                }
+                if(complete) ArrayWrites::cached[g_tintProbePendingView.Get()]=g_arrayProbeStamp;
+            }
+            TintTraceStep(TintTrace::Stage::Unmap); // TINTTRACE
             g_liveContext->Unmap(g_tintProbeReadback.Get(),0);
         }
+        TintTraceStep(TintTrace::Stage::PendingCleanup); // TINTTRACE
         g_tintProbePending=false; g_tintProbePendingView.Reset(); g_tintProbeSource.Reset(); g_tintProbePendingPool=UINT_MAX;
     }
+    TintTraceStep(TintTrace::Stage::Maintenance); // TINTTRACE
 	const auto now=GetTickCount64();
+    if(g_exteriorReferenceValid && g_exteriorReferenceEventCache) {
+        ++g_cacheSkipped;
+        if(now>=g_cacheNextReport) {
+            g_cacheNextReport=now+30000;
+            LogDiagnostic([&] { return "TINT CACHE: reused validated reference epoch="+std::to_string(g_exteriorReferenceSourceEpoch)+" skippedChecks="+std::to_string(g_cacheSkipped); });
+        }
+    }
     if (exteriorView && !g_exteriorReferenceValid && !g_referenceCandidate && g_invalidReference.Due(now)) {
         g_invalidReference.Attempt(now);
         std::string failure;
         if (RecoverNamedFallback(device,failure,&g_referenceCandidate)) {
             g_candidateOriginal=exteriorView; g_candidateProbeNext=0;
-            Log("FALLBACK: persistent invalid samples; recovery candidate queued for validation.");
-        } else Log("FALLBACK: invalid-reference recovery deferred: "+failure);
+            LogDiagnostic([&] { return "FALLBACK: persistent invalid samples; recovery candidate queued for validation."; });
+        } else LogRecoveryDiagnostic(failure, [&] { return "FALLBACK: invalid-reference recovery deferred: "+failure; });
     }
     // Reuse the existing asynchronous probe; reference and atlas never compete
     // for separate GPU readback jobs. Reference refresh is at most once/second.
+    TintTraceStep(TintTrace::Stage::Candidates); // TINTTRACE
     std::vector<std::pair<ID3D11ShaderResourceView*,const UniversalEntry*>> candidates;
     candidates.reserve(g_universalViews.size()+2);
     UniversalEntry referenceEntry; referenceEntry.directCube=true;
     if (g_referenceCandidate && now>=g_candidateProbeNext) candidates.emplace_back(g_referenceCandidate.Get(),&referenceEntry);
-    if (exteriorView && now>=g_exteriorReferenceNext) {
+    if (exteriorView && TintReferenceNeedsProbe(g_exteriorReferenceValid,g_exteriorReferenceImmutable || g_exteriorReferenceEventCache) && now>=g_exteriorReferenceNext) {
         candidates.emplace_back(exteriorView.Get(),&referenceEntry);
     }
     for (const auto& item:g_universalViews) candidates.emplace_back(item.first,&item.second);
     for (auto& [raw,entryPointer]:candidates) {
+        TintTraceStep(TintTrace::Stage::Scan); // TINTTRACE
+        if(g_tintTraceCurrent)++g_tintTraceCurrent->sample.candidatesScanned; // TINTTRACE
         const auto& entry=*entryPointer;
         const bool recoveryCandidate=raw==g_referenceCandidate.Get();
         const bool reference=recoveryCandidate || raw==exteriorView.Get();
         if (!raw || (!reference && g_tintProbeDone.contains(raw))) continue;
-        if (reference && !recoveryCandidate && now<g_exteriorReferenceNext) continue;
+        if(!reference && !entry.directCube && ArrayWrites::Reuse(raw)) continue;
+        if (reference && !recoveryCandidate && (!TintReferenceNeedsProbe(g_exteriorReferenceValid,g_exteriorReferenceImmutable || g_exteriorReferenceEventCache) || now<g_exteriorReferenceNext)) continue;
         if (recoveryCandidate) g_candidateProbeNext=now+30000;
 		auto scheduled=g_tintProbeNext.find(raw);
 		if (!reference && scheduled!=g_tintProbeNext.end() && now<scheduled->second) continue;
 		if (!reference && IsExteriorFallbackView(raw)) {
 			g_tintProbeDone.insert(raw);
-			Log("TINT APPLY: named exterior fallback excluded from tint; dynamic replacement remains active.");
+			LogDiagnostic([&] { return "TINT APPLY: named exterior fallback excluded from tint; dynamic replacement remains active."; });
 			continue;
 		}
 		if (!entry.directCube && (entry.pool==UINT_MAX || entry.pool>=g_universalPools.size())) {
@@ -2483,16 +3212,27 @@ void TintAnalysisTick(ID3D11Device* device)
         D3D11_SHADER_RESOURCE_VIEW_DESC s{}; s.Format=original.Format; s.ViewDimension=D3D11_SRV_DIMENSION_TEXTURE2DARRAY;
         s.Texture2DArray.MostDetailedMip=firstMip;
         s.Texture2DArray.MipLevels=mips; s.Texture2DArray.FirstArraySlice=firstFace; s.Texture2DArray.ArraySize=cubes*6;
+        TintTraceStep(TintTrace::Stage::SourceView); // TINTTRACE
         if (FAILED(device->CreateShaderResourceView(resource.Get(),&s,g_tintProbeSource.GetAddressOf()))) continue;
+        TintTraceStep(TintTrace::Stage::ArrayStamp); // TINTTRACE
+        g_arrayProbeTracked=!reference && !entry.directCube && g_exteriorReferenceValid &&
+            (g_exteriorReferenceImmutable || g_exteriorReferenceEventCache) && ArrayWrites::Track(raw);
+        g_arrayProbeStamp=ArrayWrites::Snapshot();
+        if(g_arrayProbeTracked && !g_arrayProbeStamp.quiet) { g_tintProbeSource.Reset(); continue; }
+        TintTraceStep(TintTrace::Stage::SaveState); // TINTTRACE
         ID3D11ComputeShader* oldCS=nullptr; ID3D11ShaderResourceView* oldSRV=nullptr;
         ID3D11ClassInstance* oldInstances[256]{}; UINT oldInstanceCount=256;
         ID3D11UnorderedAccessView* oldUAV=nullptr;
         g_liveContext->CSGetShader(&oldCS,oldInstances,&oldInstanceCount);
         g_liveContext->CSGetShaderResources(0,1,&oldSRV);
         g_liveContext->CSGetUnorderedAccessViews(0,1,&oldUAV);
+        TintTraceStep(TintTrace::Stage::Dispatch); // TINTTRACE
         auto* source=g_tintProbeSource.Get(); auto* output=g_tintProbeUAV.Get();
         g_liveContext->CSSetShader(g_tintProbeCS.Get(),nullptr,0); g_liveContext->CSSetShaderResources(0,1,&source);
+        g_probeNotificationEpoch=g_fallbackNotificationEpoch.load();
+        g_probeNotificationQuiet=g_fallbackNotificationActive.load()==0;
         g_liveContext->CSSetUnorderedAccessViews(0,1,&output,nullptr); g_liveContext->Dispatch(cubes,1,1);
+        TintTraceStep(TintTrace::Stage::CopyAndQuery); // TINTTRACE
         ID3D11ShaderResourceView* nullSRV=nullptr; ID3D11UnorderedAccessView* nullUAV=nullptr;
         g_liveContext->CSSetShaderResources(0,1,&nullSRV); g_liveContext->CSSetUnorderedAccessViews(0,1,&nullUAV,nullptr);
         // Buffer box coordinates are bytes; only the dispatched prefix is read on completion.
@@ -2500,28 +3240,43 @@ void TintAnalysisTick(ID3D11Device* device)
         g_liveContext->CopySubresourceRegion(g_tintProbeReadback.Get(),0,0,0,0,
             g_tintProbeOutput.Get(),0,&probeRegion);
         g_liveContext->End(g_tintProbeQuery.Get());
+        TintTraceStep(TintTrace::Stage::RestoreState); // TINTTRACE
         g_liveContext->CSSetShader(oldCS,oldInstances,oldInstanceCount); g_liveContext->CSSetShaderResources(0,1,&oldSRV);
         for (UINT i=0;i<oldInstanceCount;++i) if (oldInstances[i]) oldInstances[i]->Release();
         g_liveContext->CSSetUnorderedAccessViews(0,1,&oldUAV,nullptr);
         if (oldCS) oldCS->Release(); if (oldSRV) oldSRV->Release(); if (oldUAV) oldUAV->Release();
+        TintTraceStep(TintTrace::Stage::Queued); // TINTTRACE
         g_tintProbePendingView=raw; g_tintProbePendingCubes=cubes; g_tintProbePendingPool=entry.pool;
         g_tintProbePendingCandidate=recoveryCandidate;
         g_tintProbePendingExterior=reference && !recoveryCandidate;
         if (recoveryCandidate) g_candidateProbeNext=now+30000;
         else if (reference) g_exteriorReferenceNext=now+1000;
 		g_tintProbeNext[raw]=now+(entry.directCube?500u:1000u);
+        // TINTTRACE BEGIN
+        if(g_tintTraceCurrent) {
+            auto& value=g_tintTraceCurrent->sample;
+            value.queued=recoveryCandidate ? TintTrace::Kind::Recovery : reference ? TintTrace::Kind::Exterior :
+                entry.directCube ? TintTrace::Kind::Direct : TintTrace::Kind::Array;
+            value.queuedPool=entry.pool;value.queuedCubes=cubes;
+        }
+        // TINTTRACE END
 		g_tintProbePending=true; return;
     }
 }
 
 void ResetTintAnalysis()
 {
+    if(g_diagnosticsEnabled)++g_tintTraceSummary.generation; // TINTTRACE
+    ArrayWrites::Reset(); g_retainedPoolSources.clear(); g_arrayProbeTracked=false;
     g_invalidReference={}; g_referenceCandidate.Reset(); g_candidateOriginal.Reset();
     g_tintProbePendingCandidate=false; g_candidateProbeNext=0;
     g_namedReferenceReady=false;
     g_directAnalysisLogged.clear();
     g_exteriorReferenceValid=false; g_exteriorReferenceView.Reset();
-    g_exteriorReferenceNext=0; g_tintProbePendingExterior=false;
+    g_exteriorReferenceNext=0; g_tintProbePendingExterior=false; g_exteriorReferenceImmutable=false; g_exteriorReferenceEventCache=false; g_exteriorReferenceSourceEpoch=0;
+    g_cacheSkipped=0; g_cacheNextReport=0;
+    g_auditReferenceView.Reset(); g_auditNextReport=0;
+    g_auditStable=0; g_auditMissed=0; g_auditNotified=0; g_auditInconclusive=0;
     g_tintProbePending=false; g_tintProbePendingView.Reset(); g_tintProbeSource.Reset();
 	g_tintProbePendingPool=UINT_MAX; g_tintProbeDone.clear(); g_tintProbeNext.clear();
         for(auto& [view,entry]:g_universalViews) entry.analyzed=false;
@@ -2705,14 +3460,18 @@ void ResetTintAnalysis()
 			g_originalPSResources(context,start,count,views); return;
 		}
 		PerfHookScope perfHook;
-        ID3D11ShaderResourceView* replacement[128]{};
+        ID3D11ShaderResourceView* replacement[128];
+        bool changed=false;
 		for (UINT i=0;i<count;++i) {
 			auto* input=views ? views[i] : nullptr;
 			const auto binding=views ? UniversalBind(start+i,input) : BindingResult{input,false};
             replacement[i]=binding.view;
+            changed |= binding.view!=input;
             SetLiveCubemapSlot(start+i,binding.replacement);
 		}
-		g_originalPSResources(context,start,count,replacement);
+        perfHook.BeginDriver(); // BINDCPU
+        // Every call still reaches D3D, including null arrays and count zero.
+        g_originalPSResources(context,start,count,changed ? replacement : views);
 	}
 
 	void STDMETHODCALLTYPE Hook_DrawIndexed(ID3D11DeviceContext* context, UINT indexCount,
@@ -3654,8 +4413,6 @@ void ResetTintAnalysis()
 	{
 		ReleaseOwned(g_captureCS);
 		ReleaseOwned(g_inferLiveCS);
-		ReleaseOwned(g_inferLiveBinaryCS);
-		for (auto& shader:g_inferLiveBlendCS) ReleaseOwned(shader);
 	}
 	void ClearIncompleteCaptureResources()
 	{
@@ -3685,196 +4442,142 @@ void ResetTintAnalysis()
 			ReleaseOwned(g_defaultCubeSRV);
 			ReleaseOwned(g_defaultCubeTexture);
 		}
-		if (!g_interiorDarkCubeTexture || !g_interiorDarkCubeSRV) {
-			g_interiorDarkCubeSRV.Reset(); g_interiorDarkCubeTexture.Reset();
-		}
 	}
 
-	bool CompileShader(
-		ID3D11Device* device)
+	bool CreateCaptureShaders(ID3D11Device* device)
 	{
-		const bool blendShadersReady=std::all_of(std::begin(g_inferLiveBlendCS),
-			std::end(g_inferLiveBlendCS),[](auto* shader) { return shader!=nullptr; });
-		if (g_captureCS && g_inferLiveCS && g_inferLiveBinaryCS && blendShadersReady) {
+		if (g_captureCS && g_inferLiveCS && g_captureShaderSeparateSky==UseSeparateSkyHistory()) {
 			return true;
 		}
-
 		ClearCaptureShaders();
 		struct ShaderAttempt {
 			bool complete=false;
 			~ShaderAttempt() { if (!complete) ClearCaptureShaders(); }
 		} attempt;
-
-		ID3DBlob* shaderBlob = nullptr;
-		ID3DBlob* errorBlob = nullptr;
-
-		const HRESULT hr =
-			D3DCompile(
-				kCaptureShader,
-				strlen(kCaptureShader),
-				"StandaloneCSUpdateCubemapCS",
-				nullptr,
-				nullptr,
-				"main",
-				"cs_5_0",
-				D3DCOMPILE_ENABLE_STRICTNESS,
-				0,
-				&shaderBlob,
-				&errorBlob);
-
-		if (FAILED(hr)) {
-			std::string message =
-				"D3DCompile failed.";
-
-			if (errorBlob) {
-				message += " ";
-
-				message.append(
-					static_cast<const char*>(
-						errorBlob->GetBufferPointer()),
-					errorBlob->GetBufferSize());
-			}
-
-			Log(message);
-
-			if (errorBlob) {
-				errorBlob->Release();
-			}
-
-			if (shaderBlob) {
-				shaderBlob->Release();
-			}
-
-			return false;
-		}
-
-		if (errorBlob) {
-			errorBlob->Release();
-		}
-
-		const HRESULT createHr =
-			device->CreateComputeShader(
-				shaderBlob->GetBufferPointer(),
-				shaderBlob->GetBufferSize(),
-				nullptr,
-				&g_captureCS);
-
-		shaderBlob->Release();
-
-		if (FAILED(createHr) ||
-			!g_captureCS) {
-			Log(
-				"CreateComputeShader failed.");
-
-			return false;
-		}
-
-		Log(
-			"Standalone Community-Shaders-style UpdateCubemap compute shader compiled successfully.");
-
-
-		ID3DBlob* liveInferBlob=nullptr;
-		ID3DBlob* liveInferError=nullptr;
-		const D3D_SHADER_MACRO liveInferMacros[]{
-			{"LIVE_LINEAR_OUTPUT","1"},
-			{nullptr,nullptr}
-		};
-		const HRESULT liveInferCompileHr=D3DCompile(
-			kInferShader,strlen(kInferShader),"StandaloneCSInferCubemapLiveLinearCS",
-			liveInferMacros,nullptr,"main","cs_5_0",D3DCOMPILE_ENABLE_STRICTNESS,0,
-			&liveInferBlob,&liveInferError);
-		if (FAILED(liveInferCompileHr)) {
-			std::string message="InferCubemap live-linear D3DCompile failed.";
-			if (liveInferError) {
-				message+=" ";
-				message.append(static_cast<const char*>(liveInferError->GetBufferPointer()),
-					liveInferError->GetBufferSize());
-			}
-			Log(message);
-			if (liveInferError) liveInferError->Release();
-			if (liveInferBlob) liveInferBlob->Release();
-			return false;
-		}
-		if (liveInferError) liveInferError->Release();
-		const HRESULT liveInferCreateHr=device->CreateComputeShader(
-			liveInferBlob->GetBufferPointer(),liveInferBlob->GetBufferSize(),nullptr,&g_inferLiveCS);
-		liveInferBlob->Release();
-		if (FAILED(liveInferCreateHr) || !g_inferLiveCS) {
-			Log("CreateComputeShader(InferCubemap live-linear) failed.");
-			return false;
-		}
-		Log("Standalone live-linear InferCubemap compute shader compiled successfully.");
-
-		ID3DBlob* binaryInferBlob=nullptr;
-		ID3DBlob* binaryInferError=nullptr;
-		const D3D_SHADER_MACRO binaryInferMacros[]{
-			{"LIVE_LINEAR_OUTPUT","1"},
-			{"FALLBACK_LOCK_WEIGHT","1.0"},
-			{nullptr,nullptr}
-		};
-		const HRESULT binaryInferCompileHr=D3DCompile(
-			kInferShader,strlen(kInferShader),"StandaloneCSInferCubemapLiveBinaryCS",
-			binaryInferMacros,nullptr,"main","cs_5_0",D3DCOMPILE_ENABLE_STRICTNESS,0,
-			&binaryInferBlob,&binaryInferError);
-		if (FAILED(binaryInferCompileHr) || !binaryInferBlob) {
-			std::string message="InferCubemap binary-validity D3DCompile failed.";
-			if (binaryInferError) {
-				message+=" ";
-				message.append(static_cast<const char*>(binaryInferError->GetBufferPointer()),
-					binaryInferError->GetBufferSize());
-			}
-			Log(message);
-			if (binaryInferError) binaryInferError->Release();
-			if (binaryInferBlob) binaryInferBlob->Release();
-			return false;
-		}
-		if (binaryInferError) binaryInferError->Release();
-		const HRESULT binaryInferCreateHr=device->CreateComputeShader(
-			binaryInferBlob->GetBufferPointer(),binaryInferBlob->GetBufferSize(),nullptr,
-			&g_inferLiveBinaryCS);
-		binaryInferBlob->Release();
-		if (FAILED(binaryInferCreateHr) || !g_inferLiveBinaryCS) {
-			Log("CreateComputeShader(InferCubemap binary-validity) failed.");
-			return false;
-		}
-		Log("Standalone binary-validity InferCubemap compute shader compiled successfully.");
-
-		const char* blendWeights[7]={"0.125","0.25","0.375","0.5","0.625","0.75","0.875"};
-		for (unsigned i=0;i<7;++i) {
-			ID3DBlob* blendBlob=nullptr;
-			ID3DBlob* blendError=nullptr;
-			const D3D_SHADER_MACRO blendMacros[]{
-				{"LIVE_LINEAR_OUTPUT","1"},
-				{"FALLBACK_LOCK_WEIGHT",blendWeights[i]},
-				{nullptr,nullptr}
-			};
-			const HRESULT blendCompileHr=D3DCompile(kInferShader,strlen(kInferShader),
-				"StandaloneCSInferCubemapLiveBlendCS",blendMacros,nullptr,"main","cs_5_0",
-				D3DCOMPILE_ENABLE_STRICTNESS,0,&blendBlob,&blendError);
-			if (FAILED(blendCompileHr) || !blendBlob) {
-				std::string message="InferCubemap staged blend D3DCompile failed.";
-				if (blendError) message+=" "+std::string(
-					static_cast<const char*>(blendError->GetBufferPointer()),blendError->GetBufferSize());
-				Log(message);
-				if (blendError) blendError->Release();
-				if (blendBlob) blendBlob->Release();
+		const auto create=[&](const DCF4Shaders::Bytecode& code,
+			ID3D11ComputeShader** shader,const char* label) {
+			const HRESULT hr=device->CreateComputeShader(code.data,code.size,nullptr,shader);
+			if (FAILED(hr) || !*shader) {
+				Log(std::string("CreateComputeShader failed: ")+label);
 				return false;
 			}
-			if (blendError) blendError->Release();
-			const HRESULT blendCreateHr=device->CreateComputeShader(blendBlob->GetBufferPointer(),
-				blendBlob->GetBufferSize(),nullptr,&g_inferLiveBlendCS[i]);
-			blendBlob->Release();
-			if (FAILED(blendCreateHr) || !g_inferLiveBlendCS[i]) {
-				Log("CreateComputeShader(InferCubemap staged blend) failed.");
-				return false;
-			}
-		}
-		Log("Seven staged fallback-blend InferCubemap shaders compiled successfully.");
-
+			return true;
+		};
+		const auto captureCode=UseSeparateSkyHistory() ? DCF4Shaders::Capture : DCF4Shaders::CaptureDirect;
+		const auto inferCode=UseSeparateSkyHistory() ? DCF4Shaders::InferLive : DCF4Shaders::InferDirect;
+		if (!create(captureCode,&g_captureCS,"Capture") ||
+			!create(inferCode,&g_inferLiveCS,"Infer scene-linear")) return false;
+		g_captureShaderSeparateSky=UseSeparateSkyHistory();
 		attempt.complete=true;
+		Log("CAPTURE: embedded compute shaders ready.");
 		return true;
 	}
 
+	void ReleaseSkyHistory()
+	{
+		DCFDiag::ClearSkyPreview();
+		g_skyHistorySRV.Reset();
+		g_skyHistoryUAV.Reset();
+		g_skyHistoryTexture.Reset();
+	}
+	bool EnsureSkyHistoryResources(ID3D11Device* device)
+	{
+		if (!UseSeparateSkyHistory()) {
+			if (g_skyHistoryTexture || g_skyHistoryUAV || g_skyHistorySRV) ReleaseSkyHistory();
+			return true;
+		}
+		if (!g_skyHistoryTexture || !g_skyHistoryUAV || !g_skyHistorySRV) {
+			Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
+			Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> uav;
+			Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv;
+			D3D11_TEXTURE2D_DESC desc{};
+			desc.Width=kCubeSize; desc.Height=kCubeSize;
+			desc.MipLevels=1; desc.ArraySize=6;
+			desc.Format=DXGI_FORMAT_R16G16B16A16_FLOAT;
+			desc.SampleDesc.Count=1;
+			desc.Usage=D3D11_USAGE_DEFAULT;
+			desc.BindFlags=D3D11_BIND_SHADER_RESOURCE|D3D11_BIND_UNORDERED_ACCESS;
+			desc.MiscFlags=D3D11_RESOURCE_MISC_TEXTURECUBE;
+			D3D11_UNORDERED_ACCESS_VIEW_DESC ud{};
+			ud.Format=desc.Format; ud.ViewDimension=D3D11_UAV_DIMENSION_TEXTURE2DARRAY;
+			ud.Texture2DArray.ArraySize=6;
+			D3D11_SHADER_RESOURCE_VIEW_DESC sd{};
+			sd.Format=desc.Format; sd.ViewDimension=D3D11_SRV_DIMENSION_TEXTURECUBE;
+			sd.TextureCube.MipLevels=1;
+			if (FAILED(device->CreateTexture2D(&desc,nullptr,texture.GetAddressOf())) ||
+				FAILED(device->CreateUnorderedAccessView(texture.Get(),&ud,uav.GetAddressOf())) ||
+				FAILED(device->CreateShaderResourceView(texture.Get(),&sd,srv.GetAddressOf()))) {
+				Log("SKY HISTORY: allocation failed; capture setup will retry.");
+				return false;
+			}
+			g_skyHistoryTexture=texture; g_skyHistoryUAV=uav; g_skyHistorySRV=srv;
+			// Force the existing first-capture clear before sampling this resource.
+			g_haveHistoryOrigin=false;
+			Log("SKY HISTORY: sky history resources ready.");
+		}
+		return true;
+	}
+
+// SKYCOLOR BEGIN
+bool UseSkyColor()
+{
+    return g_liveEnabled && g_activeCellKind==1;
+}
+
+bool EnsureSkyColorResources(ID3D11Device* device)
+{
+    if (!UseSkyColor()) {
+        g_skyColorSRV.Reset(); g_skyColorUAV.Reset(); g_skyColorTexture.Reset();
+        return true;
+    }
+    if (g_skyColorTexture && g_skyColorUAV && g_skyColorSRV && g_skyColorCS) return true;
+    using Microsoft::WRL::ComPtr;
+    ComPtr<ID3D11Texture2D> texture;
+    ComPtr<ID3D11UnorderedAccessView> uav;
+    ComPtr<ID3D11ShaderResourceView> srv;
+    ComPtr<ID3D11ComputeShader> shader;
+    D3D11_TEXTURE2D_DESC d{};
+    d.Width=d.Height=d.MipLevels=1; d.ArraySize=6;
+    d.Format=DXGI_FORMAT_R32G32B32A32_FLOAT; d.SampleDesc.Count=1;
+    d.Usage=D3D11_USAGE_DEFAULT;
+    d.BindFlags=D3D11_BIND_SHADER_RESOURCE|D3D11_BIND_UNORDERED_ACCESS;
+    d.MiscFlags=D3D11_RESOURCE_MISC_TEXTURECUBE;
+    D3D11_UNORDERED_ACCESS_VIEW_DESC u{};
+    u.Format=d.Format; u.ViewDimension=D3D11_UAV_DIMENSION_TEXTURE2DARRAY;
+    u.Texture2DArray.ArraySize=6;
+    D3D11_SHADER_RESOURCE_VIEW_DESC v{};
+    v.Format=d.Format; v.ViewDimension=D3D11_SRV_DIMENSION_TEXTURECUBE;
+    v.TextureCube.MipLevels=1;
+    const auto code=DCF4Shaders::SkyColor;
+    if (FAILED(device->CreateTexture2D(&d,nullptr,texture.GetAddressOf())) ||
+        FAILED(device->CreateUnorderedAccessView(texture.Get(),&u,uav.GetAddressOf())) ||
+        FAILED(device->CreateShaderResourceView(texture.Get(),&v,srv.GetAddressOf())) ||
+        FAILED(device->CreateComputeShader(code.data,code.size,nullptr,shader.GetAddressOf()))) {
+        Log("SKY COLOR: allocation failed; capture setup will retry.");
+        return false;
+    }
+    TagReflectionReplacement(texture.Get());
+    g_skyColorTexture=texture; g_skyColorUAV=uav; g_skyColorSRV=srv; g_skyColorCS=shader;
+    g_haveHistoryOrigin=false;
+    LogDiagnostic([] { return "SKY COLOR: exterior depth-masked 32x32 screen samples; sky-only GPU fill ready."; });
+    return true;
+}
+
+// Runs inside the existing capture state scope. Reuses its scene SRVs and 256-byte
+// constants; only UAV0 and the shader change, and the existing restore covers both.
+void DispatchSkyColor(ID3D11DeviceContext* context)
+{
+    if (!UseSkyColor() || !g_skyColorUAV || !g_skyColorCS) return;
+    if (g_diagnosticsEnabled) { DCFDiag::EndPass(); DCFDiag::BeginPass("Sky color"); }
+    ID3D11UnorderedAccessView* none[5]{};
+    context->CSSetUnorderedAccessViews(0,UseSeparateSkyHistory()?5u:4u,none,nullptr);
+    auto* target=g_skyColorUAV.Get();
+    context->CSSetUnorderedAccessViews(0,1,&target,nullptr);
+    context->CSSetShader(g_skyColorCS.Get(),nullptr,0);
+    context->Dispatch(1,1,1);
+}
+
+// SKYCOLOR END
 	bool CreateResources(
 		ID3D11Device* device)
 	{
@@ -3883,7 +4586,7 @@ void ResetTintAnalysis()
 			~ResourceAttempt() { ClearIncompleteCaptureResources(); }
 		} attempt;
 
-		if (!CompileShader(device)) {
+		if (!CreateCaptureShaders(device)) {
 			return false;
 		}
 
@@ -4052,35 +4755,11 @@ void ResetTintAnalysis()
 			return false;
 		}
 
-		if (!g_skyHistoryTexture || !g_skyHistoryUAV || !g_skyHistorySRV) {
-			Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
-			Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> uav;
-			Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv;
-			D3D11_TEXTURE2D_DESC desc{};
-			desc.Width=kCubeSize; desc.Height=kCubeSize;
-			desc.MipLevels=1; desc.ArraySize=6;
-			desc.Format=DXGI_FORMAT_R16G16B16A16_FLOAT;
-			desc.SampleDesc.Count=1;
-			desc.Usage=D3D11_USAGE_DEFAULT;
-			desc.BindFlags=D3D11_BIND_SHADER_RESOURCE|D3D11_BIND_UNORDERED_ACCESS;
-			desc.MiscFlags=D3D11_RESOURCE_MISC_TEXTURECUBE;
-			D3D11_UNORDERED_ACCESS_VIEW_DESC ud{};
-			ud.Format=desc.Format; ud.ViewDimension=D3D11_UAV_DIMENSION_TEXTURE2DARRAY;
-			ud.Texture2DArray.ArraySize=6;
-			D3D11_SHADER_RESOURCE_VIEW_DESC sd{};
-			sd.Format=desc.Format; sd.ViewDimension=D3D11_SRV_DIMENSION_TEXTURECUBE;
-			sd.TextureCube.MipLevels=1;
-			if (FAILED(device->CreateTexture2D(&desc,nullptr,texture.GetAddressOf())) ||
-				FAILED(device->CreateUnorderedAccessView(texture.Get(),&ud,uav.GetAddressOf())) ||
-				FAILED(device->CreateShaderResourceView(texture.Get(),&sd,srv.GetAddressOf()))) {
-				Log("SKY HISTORY: allocation failed; capture setup will retry.");
-				return false;
-			}
-			g_skyHistoryTexture=texture; g_skyHistoryUAV=uav; g_skyHistorySRV=srv;
-			// Force the existing first-capture clear before sampling this resource.
-			g_haveHistoryOrigin=false;
-			Log("SKY HISTORY: sky history resources ready.");
-		}
+		if (!EnsureSkyHistoryResources(device)) return false;
+// SKYCOLOR BEGIN
+        if (!EnsureSkyColorResources(device)) return false;
+// SKYCOLOR END
+
 
 		if (!g_coverageTexture ||
 			!g_coverageUAV) {
@@ -4258,38 +4937,7 @@ void ResetTintAnalysis()
 			}
 		}
 
-		if (!g_interiorDarkCubeTexture || !g_interiorDarkCubeSRV) {
-			// Scene-linear dark brown. This is intentionally generated in memory:
-			// interiors never depend on watercreekcube.dds or another shipped file.
-			const std::uint16_t darkBrownHalfRGBA[4]{
-				0x287Bu, // R = 0.035
-				0x249Cu, // G = 0.018
-				0x2019u, // B = 0.008
-				0x3C00u  // A = 1.0
-			};
-			D3D11_SUBRESOURCE_DATA initialData[6]{};
-			for (auto& face : initialData) {
-				face.pSysMem=darkBrownHalfRGBA;
-				face.SysMemPitch=sizeof(darkBrownHalfRGBA);
-				face.SysMemSlicePitch=sizeof(darkBrownHalfRGBA);
-			}
-			D3D11_TEXTURE2D_DESC desc{};
-			desc.Width=1; desc.Height=1; desc.MipLevels=1; desc.ArraySize=6;
-			desc.Format=DXGI_FORMAT_R16G16B16A16_FLOAT; desc.SampleDesc.Count=1;
-			desc.Usage=D3D11_USAGE_IMMUTABLE; desc.BindFlags=D3D11_BIND_SHADER_RESOURCE;
-			desc.MiscFlags=D3D11_RESOURCE_MISC_TEXTURECUBE;
-			if (FAILED(device->CreateTexture2D(&desc,initialData,g_interiorDarkCubeTexture.ReleaseAndGetAddressOf()))) {
-				Log("CreateTexture2D failed: internal dark-brown interior fallback"); return false;
-			}
-			D3D11_SHADER_RESOURCE_VIEW_DESC view{};
-			view.Format=desc.Format; view.ViewDimension=D3D11_SRV_DIMENSION_TEXTURECUBE;
-			view.TextureCube.MostDetailedMip=0; view.TextureCube.MipLevels=1;
-			if (FAILED(device->CreateShaderResourceView(g_interiorDarkCubeTexture.Get(),&view,
-				g_interiorDarkCubeSRV.ReleaseAndGetAddressOf()))) {
-				Log("CreateShaderResourceView failed: internal dark-brown interior fallback"); return false;
-			}
-			Log("CELL FALLBACK: internal scene-linear dark-brown interior cube created.");
-		}
+
 
 
 		return true;
@@ -4304,7 +4952,8 @@ void ResetTintAnalysis()
 			!g_inferLiveCS ||
 			!captureSRV ||
 			!g_inferredUAV ||
-			!g_skyHistorySRV ||
+			(UseSeparateSkyHistory() && !g_skyHistorySRV) ||
+			g_captureShaderSeparateSky!=UseSeparateSkyHistory() ||
 			!g_defaultCubeSRV ||
 			!g_linearSampler) {
 			Log(
@@ -4312,12 +4961,15 @@ void ResetTintAnalysis()
 			return false;
 		}
 
+        if(g_diagnosticsEnabled) DCFDiag::BeginPass("Capture mips");
 		// Upstream base-stream path: GenerateMips(capture color) before Infer.
-		context->GenerateMips(
-			captureSRV);
+		context->GenerateMips(captureSRV);
+        if(g_diagnosticsEnabled) { DCFDiag::EndPass(); DCFDiag::BeginPass("Inference"); }
+        struct EndInferenceTiming { ~EndInferenceTiming() { if(g_diagnosticsEnabled) DCFDiag::EndPass(); } } timing;
+
 
 		ID3D11ComputeShader* oldCS = nullptr;
-		ID3D11ShaderResourceView* oldSRVs[3]{
+		ID3D11ShaderResourceView* oldSRVs[4]{ // SKYCOLOR
 			nullptr, nullptr, nullptr
 		};
 		ID3D11ClassInstance* oldInstances[256]{};
@@ -4329,7 +4981,7 @@ void ResetTintAnalysis()
 
 		context->CSGetShaderResources(
 			0,
-			3,
+			4, // SKYCOLOR
 			oldSRVs);
 
 		context->CSGetUnorderedAccessViews(
@@ -4342,19 +4994,17 @@ void ResetTintAnalysis()
 			1,
 			&oldSampler);
 
-		// The configured cell fallback is identified by engine path through both
-		// loose-file and streaming routes. Its pixels, size and compression are
-		// deliberately not fingerprinted; D3D samples it by normalized direction.
-		// Hold an owning reference until the dispatch has accepted the binding.
-		// A streaming reload may replace the global exterior fallback concurrently.
+		// Retain a startup image only for directions with no usable capture.
+		// Exterior uses the named texture; interior uses the neutral placeholder.
+		// Hold an owning reference across concurrent streaming replacement.
 		auto fallbackOwner=AcquireNamedCellFallback();
-		ID3D11ShaderResourceView* fallback=
-			g_activeCellKind==2 ? g_interiorDarkCubeSRV.Get() : fallbackOwner.Get();
+		ID3D11ShaderResourceView* fallback=fallbackOwner.Get();
 		if (!fallback) fallback=g_defaultCubeSRV;
-		ID3D11ShaderResourceView* srvs[3]{
+		ID3D11ShaderResourceView* srvs[4]{ // SKYCOLOR
 			captureSRV,
-			g_activeCellKind==1 ? g_skyHistorySRV.Get() : nullptr,
-			fallback
+			UseSeparateSkyHistory() ? g_skyHistorySRV.Get() : nullptr,
+			fallback,
+			UseSkyColor() ? g_skyColorSRV.Get() : nullptr // SKYCOLOR
 		};
 
 		ID3D11UnorderedAccessView* uav =
@@ -4362,7 +5012,7 @@ void ResetTintAnalysis()
 
 		context->CSSetShaderResources(
 			0,
-			3,
+			4, // SKYCOLOR
 			srvs);
 
 		context->CSSetUnorderedAccessViews(
@@ -4376,19 +5026,9 @@ void ResetTintAnalysis()
 			1,
 			&g_linearSampler);
 
-		ID3D11ComputeShader* inferShader=g_inferLiveCS;
-		{
-			if (g_fallbackLockStarted) {
-				const auto frame=g_accumulatedFrames.load(std::memory_order_relaxed);
-				const auto elapsed=frame>g_fallbackLockStartFrame ? frame-g_fallbackLockStartFrame : 0u;
-				const unsigned stage=std::min(8u,
-					static_cast<unsigned>((static_cast<std::uint64_t>(elapsed)*8u)/g_fallbackLockFrames));
-				if (stage>=8) inferShader=g_inferLiveBinaryCS;
-				else if (stage>0) inferShader=g_inferLiveBlendCS[stage-1];
-			}
-		}
+
 		context->CSSetShader(
-			inferShader,
+			g_inferLiveCS,
 			nullptr,
 			0);
 
@@ -4397,7 +5037,7 @@ void ResetTintAnalysis()
 			(kCubeSize + 7u) / 8u,
 			6);
 
-		ID3D11ShaderResourceView* nullSRVs[3]{
+		ID3D11ShaderResourceView* nullSRVs[4]{ // SKYCOLOR
 			nullptr, nullptr, nullptr
 		};
 
@@ -4409,7 +5049,7 @@ void ResetTintAnalysis()
 
 		context->CSSetShaderResources(
 			0,
-			3,
+			4, // SKYCOLOR
 			nullSRVs);
 
 		context->CSSetUnorderedAccessViews(
@@ -4433,7 +5073,7 @@ void ResetTintAnalysis()
 
 		context->CSSetShaderResources(
 			0,
-			3,
+			4, // SKYCOLOR
 			oldSRVs);
 
 		context->CSSetUnorderedAccessViews(
@@ -4571,6 +5211,7 @@ void ResetTintAnalysis()
 		if (!std::isfinite(currentOrigin.x) || !std::isfinite(currentOrigin.y) ||
 			!std::isfinite(currentOrigin.z)) return false;
 
+		if(g_diagnosticsEnabled) DCFDiag::EndPass();
 		clearFirstFrame=clearFirstFrame || !g_haveHistoryOrigin;
 		XMFLOAT3 historyDelta{};
 		if (!clearFirstFrame) {
@@ -4583,14 +5224,13 @@ void ResetTintAnalysis()
 				Log("HISTORY: large camera displacement; cleared instead of reprojecting a teleport.");
 			} else if (g_reprojectEnabled && !g_reprojectFailed &&
 				distance>=g_reprojectMinMove) {
-				if (ReprojectHistory(device,context,historyDelta)) {
+                if(g_diagnosticsEnabled) DCFDiag::BeginPass("Reprojection");
+                const bool reprojected=ReprojectHistory(device,context,historyDelta);
+                if(g_diagnosticsEnabled) DCFDiag::EndPass();
+				if (reprojected) {
 					g_historyOrigin=currentOrigin;
 					historyDelta=XMFLOAT3{};
-					if (!g_fallbackLockStarted) {
-						g_fallbackLockStarted=true;
-						g_fallbackLockStartFrame=g_accumulatedFrames.load(std::memory_order_relaxed);
-						Log("FALLBACK: first reprojection started staged validity transition.");
-					}
+
 				} else {
 					g_reprojectFailed=true;
 					Log("REPROJECT disabled after setup failure; retaining directional history.");
@@ -4604,12 +5244,14 @@ void ResetTintAnalysis()
 		}
 
 		if (clearFirstFrame) {
-			g_fallbackLockStarted=false;
-			g_fallbackLockStartFrame=0;
+            if(g_diagnosticsEnabled) DCFDiag::BeginPass("History clear");
 			const float clear[4]{0.0f,0.0f,0.0f,0.0f};
 			context->ClearUnorderedAccessViewFloat(g_colorUAV,clear);
 			context->ClearUnorderedAccessViewFloat(g_rawUAV,clear);
-			context->ClearUnorderedAccessViewFloat(g_skyHistoryUAV.Get(),clear);
+			if (UseSeparateSkyHistory()) context->ClearUnorderedAccessViewFloat(g_skyHistoryUAV.Get(),clear);
+// SKYCOLOR BEGIN
+            if (UseSkyColor() && g_skyColorUAV) context->ClearUnorderedAccessViewFloat(g_skyColorUAV.Get(),clear);
+// SKYCOLOR END
 			context->ClearUnorderedAccessViewFloat(g_positionUAV,clear);
 			const UINT clearCoverage[4]{0u,0u,0u,0u};
 			context->ClearUnorderedAccessViewUint(g_coverageUAV,clearCoverage);
@@ -4618,7 +5260,9 @@ void ResetTintAnalysis()
 			g_haveHistoryOrigin=true;
 			historyDelta=XMFLOAT3{};
 			Log("CAPTURE: history cleared; starting fresh accumulation.");
+            if(g_diagnosticsEnabled) DCFDiag::EndPass();
 		}
+        if(g_diagnosticsEnabled) DCFDiag::BeginPass("Capture constants");
 
 		constants.historyOffset=XMFLOAT4(historyDelta.x*0.001f,
 			historyDelta.y*0.001f,historyDelta.z*0.001f,0.0f);
@@ -4693,11 +5337,13 @@ void ResetTintAnalysis()
 		context->Unmap(
 			g_constants,
 			0);
+        if(g_diagnosticsEnabled) { DCFDiag::EndPass(); DCFDiag::BeginPass("Capture bindings"); }
 
 		ID3D11ComputeShader* oldCS = nullptr;
 		ID3D11ShaderResourceView* oldSRVs[2]{
 			nullptr, nullptr
 		};
+		const UINT captureUAVCount=UseSeparateSkyHistory() ? 5u : 4u;
 		ID3D11UnorderedAccessView* oldUAVs[5]{
 			nullptr, nullptr, nullptr, nullptr
 		};
@@ -4718,7 +5364,7 @@ void ResetTintAnalysis()
 
 		context->CSGetUnorderedAccessViews(
 			0,
-			5,
+			captureUAVCount,
 			oldUAVs);
 
 		context->CSGetConstantBuffers(
@@ -4741,7 +5387,7 @@ void ResetTintAnalysis()
 			g_rawUAV,
 			g_positionUAV,
 			g_coverageUAV,
-			g_skyHistoryUAV.Get()
+			UseSeparateSkyHistory() ? g_skyHistoryUAV.Get() : nullptr
 		};
 
 		context->CSSetShader(
@@ -4756,7 +5402,7 @@ void ResetTintAnalysis()
 
 		context->CSSetUnorderedAccessViews(
 			0,
-			5,
+			captureUAVCount,
 			uavs,
 			nullptr);
 
@@ -4770,10 +5416,15 @@ void ResetTintAnalysis()
 			1,
 			&g_linearSampler);
 
+        if(g_diagnosticsEnabled) { DCFDiag::EndPass(); DCFDiag::BeginPass("Capture dispatch"); }
 		context->Dispatch(
 			(kCubeSize + 7u) / 8u,
 			(kCubeSize + 7u) / 8u,
 			6);
+// SKYCOLOR BEGIN
+        DispatchSkyColor(context);
+// SKYCOLOR END
+        if(g_diagnosticsEnabled) { DCFDiag::EndPass(); DCFDiag::BeginPass("Capture restore"); }
 
 		ID3D11ShaderResourceView* nullSRVs[2]{
 			nullptr, nullptr
@@ -4791,7 +5442,7 @@ void ResetTintAnalysis()
 
 		context->CSSetUnorderedAccessViews(
 			0,
-			5,
+			captureUAVCount,
 			nullUAVs,
 			nullptr);
 
@@ -4823,7 +5474,7 @@ void ResetTintAnalysis()
 
 		context->CSSetUnorderedAccessViews(
 			0,
-			5,
+			captureUAVCount,
 			oldUAVs,
 			nullptr);
 
@@ -4864,58 +5515,6 @@ void ResetTintAnalysis()
 		return true;
 	}
 
-    bool ApplyMaterialMip(UINT mip)
-    {
-        if (mip>=kCubeMipCount) return false;
-        if (mip==g_materialMip) return true;
-        if (!g_liveContext) { g_materialMip=mip; return true; }
-        Microsoft::WRL::ComPtr<ID3D11Device> device;
-        g_liveContext->GetDevice(device.GetAddressOf());
-        if (!device) return false;
-        using View=Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>;
-        struct PendingView { View* target; std::array<View,8>* cache; View replacement; };
-        std::vector<PendingView> pending;
-        pending.reserve(g_universalPools.size()+1);
-        const auto prepare=[&](View& view, std::array<View,8>& cache) {
-            if (!view) return true;
-            cache[g_materialMip]=view;
-            D3D11_SHADER_RESOURCE_VIEW_DESC desc{}; view->GetDesc(&desc);
-            if (desc.ViewDimension==D3D11_SRV_DIMENSION_TEXTURECUBE) {
-                desc.TextureCube.MostDetailedMip=mip; desc.TextureCube.MipLevels=1;
-            } else if (desc.ViewDimension==D3D11_SRV_DIMENSION_TEXTURECUBEARRAY) {
-                desc.TextureCubeArray.MostDetailedMip=mip; desc.TextureCubeArray.MipLevels=1;
-            } else return false;
-            Microsoft::WRL::ComPtr<ID3D11Resource> resource; view->GetResource(resource.GetAddressOf());
-            PendingView entry{&view,&cache,{}};
-            if (cache[mip]) entry.replacement=cache[mip];
-            else if (FAILED(device->CreateShaderResourceView(resource.Get(),&desc,entry.replacement.GetAddressOf()))) return false;
-            pending.push_back(std::move(entry));
-            return true;
-        };
-        if (!prepare(g_liveSRV,g_liveMaterialViews)) return false;
-        for (auto& pool:g_universalPools) if (!prepare(pool.view,pool.materialViews)) return false;
-        // Validate before changing bindings; a pool can exist before its first publication.
-        for (auto& pool:g_universalPools) {
-            if (!pool.texture || pool.failed) continue;
-            if (!g_universalReplicateCS || !g_universalLiveMipSRVs[mip] ||
-                !pool.mipUAVs[mip] || !pool.tintConstants) return false;
-        }
-        // Commit only after all views are available; restore bindings while old views remain identifiable.
-        RepairLiveBindings(true);
-        // Unselected pool mips may be stale or uninitialized. Fill before exposing them,
-        // including settings changes on callbacks that skip capture.
-        for (auto& pool:g_universalPools) {
-            if (pool.texture && !pool.failed) UniversalReplicatePool(pool, mip);
-        }
-        for (auto& entry:pending) {
-            (*entry.cache)[mip]=entry.replacement;
-            *entry.target=std::move(entry.replacement);
-        }
-        g_materialMip=mip;
-        RebuildMaterialViewLookup();
-        RepairLiveBindings(false);
-        return true;
-    }
 
 	bool PublishLiveCube()
 	{
@@ -4931,15 +5530,14 @@ void ResetTintAnalysis()
 			d.BindFlags=D3D11_BIND_SHADER_RESOURCE|D3D11_BIND_RENDER_TARGET;
 			d.MiscFlags=D3D11_RESOURCE_MISC_TEXTURECUBE|D3D11_RESOURCE_MISC_GENERATE_MIPS;
 			g_liveTexture.Reset(); g_liveSRV.Reset(); g_liveMipSource.Reset();
-            for (auto& view:g_liveMaterialViews) view.Reset();
             RebuildMaterialViewLookup();
 			if (FAILED(device->CreateTexture2D(&d,nullptr,g_liveTexture.GetAddressOf()))) return false;
 			TagReflectionReplacement(g_liveTexture.Get());
 			D3D11_SHADER_RESOURCE_VIEW_DESC v{}; v.Format=d.Format;
 			v.ViewDimension=D3D11_SRV_DIMENSION_TEXTURECUBE; v.TextureCube.MipLevels=kCubeMipCount;
 			if (FAILED(device->CreateShaderResourceView(g_liveTexture.Get(),&v,g_liveMipSource.GetAddressOf()))) return false;
-			// Expose the selected material mip; internal mip views stay complete.
-			v.TextureCube.MostDetailedMip=g_materialMip; v.TextureCube.MipLevels=1;
+			// Expose the full chain for the game shader and sampler to select LOD.
+			v.TextureCube.MostDetailedMip=0; v.TextureCube.MipLevels=kCubeMipCount;
 			if (FAILED(device->CreateShaderResourceView(g_liveTexture.Get(),&v,g_liveSRV.GetAddressOf()))) return false;
             RebuildMaterialViewLookup();
 		}
@@ -4947,10 +5545,13 @@ void ResetTintAnalysis()
 		const bool inferred=DispatchInference(g_liveContext,g_colorCubeSRV);
         if(inferred) PerfStage(2);
 		if (!inferred) { RepairLiveBindings(false); return false; }
+        if(g_diagnosticsEnabled) DCFDiag::BeginPass("Output copy");
 		for (UINT face=0;face<6;++face) g_liveContext->CopySubresourceRegion(g_liveTexture.Get(),face*kCubeMipCount,
 			0,0,0,g_inferredTexture,face,nullptr);
+        if(g_diagnosticsEnabled) { DCFDiag::EndPass(); DCFDiag::BeginPass("Output mips"); }
 		// Preserve inferred mip zero; generate only the lower material-facing mips.
 		g_liveContext->GenerateMips(g_liveMipSource.Get());
+        if(g_diagnosticsEnabled) DCFDiag::EndPass();
 		UniversalPublish();
 		g_liveReady=true;
 		RepairLiveBindings(false);
@@ -5021,13 +5622,55 @@ void ResetTintAnalysis()
 
 
     bool PerfRunAccumulation(bool reset) {
+        if (g_diagnosticsEnabled) {
+            auto* r=RE::BSGraphics::GetRendererData();
+            if(r) {
+                static bool reported=false;
+                const bool ready=DCFDiag::Prepare(reinterpret_cast<ID3D11Device*>(r->device),
+                    reinterpret_cast<ID3D11DeviceContext*>(r->context),
+                    reinterpret_cast<IDXGISwapChain*>(r->renderWindow[0].swapChain));
+                if(!reported) { Log(ready ? "PROFILER: overlay ready; Ctrl+F6 visibility, Ctrl+F7 CPU/GPU, Ctrl+F8 mip, Ctrl+F9 confidence." : "PROFILER: overlay initialization failed; reflection rendering unchanged."); reported=true; }
+            }
+            DCFDiag::BeginUpdate();
+            DCFDiag::BeginPass("Timing control"); DCFDiag::EndPass();
+            DCFDiag::BeginPass("Capture setup");
+        }
         PerfBeginCapture();
         const bool ok=DispatchAccumulationFrame(reset);
+        if(g_diagnosticsEnabled) { DCFDiag::EndPass(); if(!ok) DCFDiag::EndUpdate(); }
         if(ok) PerfStage(1); else PerfEndCapture();
         return ok;
     }
     bool PerfRunPublication() {
-        const bool ok=PublishLiveCube(); PerfEndCapture(); return ok;
+        const bool ok=PublishLiveCube(); PerfEndCapture();
+        if(g_diagnosticsEnabled) {
+            DCFDiag::EndUpdate();
+            const auto spike=DCFDiag::TakeSpikeReport();
+            if(!spike.empty()) Log(spike);
+            const auto summary=DCFDiag::TakeTimingReport();
+            if(!summary.empty()) Log(summary);
+            // POOLTRACE BEGIN
+            const auto poolReport=DCFDiag::TakePoolReport();
+            if(!poolReport.empty())Log(poolReport);
+            // POOLTRACE END
+            // TINTTRACE BEGIN
+            const auto traceNow=GetTickCount64()-g_logStart;
+            const auto tintSlow=g_tintTraceSummary.TakeSlow(traceNow);
+            if(!tintSlow.empty())Log(tintSlow);
+            const auto tintSummary=g_tintTraceSummary.Report(traceNow);
+            if(!tintSummary.empty())Log(tintSummary);
+            // TINTTRACE END
+            auto fallback=AcquireNamedCellFallback();
+            auto* f=fallback.Get();
+            if(!f) f=g_defaultCubeSRV;
+// SKYCOLOR BEGIN
+            if (UseSkyColor() && g_skyColorSRV) f=g_skyColorSRV.Get();
+// SKYCOLOR END
+            DCFDiag::SetPreviews(g_colorCubeSRV,UseSeparateSkyHistory()?g_skyHistorySRV.Get():nullptr,
+                f,g_inferredSRV,g_liveMipSource.Get(),2);
+            DCFDiag::SetBindingStats(g_perfHook.n?g_perfHook.sum/g_perfHook.n:0,g_perfHook.maximum,g_perfHook.n,g_perfHookCalls);
+        }
+        return ok;
     }
 	void ManualCaptureTick()
 	{
@@ -5071,26 +5714,12 @@ void ResetTintAnalysis()
             return;
         }
         if (!g_liveEnabled && !g_autoStartPending) return;
-        const UINT requestedMip=MaterialMipForMode(g_requestedRoughness);
-        static ULONGLONG nextMipAttempt=0;
-        static int reportedFailedMode=-1;
-        if (requestedMip!=g_materialMip && now>=nextMipAttempt) {
-            nextMipAttempt=now+1000;
-            if (ApplyMaterialMip(requestedMip)) {
-                reportedFailedMode=-1;
-                Log("MCM: reflection softness mode="+std::to_string(g_requestedRoughness)+
-                    " materialMip="+std::to_string(g_materialMip));
-            } else if (reportedFailedMode!=g_requestedRoughness) {
-                reportedFailedMode=g_requestedRoughness;
-                Log("MCM: reflection mip change deferred; previous views retained.");
-            }
-        }
+
 		if (g_reprojectEnabled!=g_requestedReprojection) {
 			g_reprojectEnabled=g_requestedReprojection;
+			if (!UseSeparateSkyHistory()) ReleaseSkyHistory();
 			g_reprojectFailed=false;
 			g_haveHistoryOrigin=false;
-			g_fallbackLockStarted=false;
-			g_fallbackLockStartFrame=0;
 			Log(std::string("MCM: reprojection ")+(g_reprojectEnabled ? "ON" : "OFF"));
 		}
 
@@ -5137,7 +5766,7 @@ void ResetTintAnalysis()
 				g_reprojectFailed=false;
 				g_accumulatedFrames.store(0); g_accumulating.store(true);
 				ResetTintAnalysis();
-				Log("LIVE ON: observation-driven fallback fade enabled.");
+				Log("LIVE ON: scene-derived reflection inference enabled.");
 			} else {
 				g_liveReady=false;
 				g_accumulating.store(false);
@@ -5147,6 +5776,7 @@ void ResetTintAnalysis()
 		}
 		if (!g_liveEnabled) return;
 		if (UpdateCellFallbackKind()) {
+            if (!UseSeparateSkyHistory()) ReleaseSkyHistory();
 			// Do not carry exterior history into an interior (or vice versa).
 			g_haveHistoryOrigin=false;
 			g_accumulatedFrames.store(0);
@@ -5250,7 +5880,7 @@ F4SE_PLUGIN_LOAD(
 			<< " " << utc.wHour << ":" << utc.wMinute << ":" << utc.wSecond << " ===\n";
 		if (rotationError) log << "LOG: rotation failed; preserved current by appending; Windows error=" << rotationError << "\n";
 
-		log << "DynamicCubemapF4 1.4\n"
+		log << "DynamicCubemapF4 1.5\n"
 			<< "Runtime family: " << g_runtimeProfile.name << "\n"
 			<< "Runtime version: " << g_runtimeVersion << "\n"
 			<< "Support: send DynamicCubemapF4.log and DynamicCubemapF4.previous.log from Data/F4SE/Plugins.\n";
@@ -5267,10 +5897,7 @@ F4SE_PLUGIN_LOAD(
 	}
 	LoadSettings();
 	Log("SETTINGS: enabled="+std::to_string(g_requestedEnabled.load())+
-		" reprojection="+std::to_string(g_requestedReprojection)+
-		" softness="+std::to_string(g_requestedRoughness)+
-        " requestedMaterialMip="+std::to_string(MaterialMipForMode(g_requestedRoughness))+" cubeSize=128");
-	Log("MCM: settings loaded.");
+		" reprojection="+std::to_string(g_requestedReprojection)+" mipSelection=game cubeSize=128");
 	if (!InstallCellFallbackHooks()) {
 		Log("Plugin load aborted because cell-fallback path hooks could not be installed.");
 		return false;
@@ -5304,7 +5931,7 @@ F4SE_PLUGIN_LOAD(
 // The load entry point independently rejects unknown runtimes before library init.
 F4SE_PLUGIN_VERSION = []() noexcept {
     F4SE::PluginVersionData v{};
-    v.PluginVersion({1, 4, 0, 0});
+    v.PluginVersion({1, 5, 0, 0});
     v.PluginName("DynamicCubemapF4");
     v.AuthorName("103Sakamoto");
     v.UsesAddressLibraryAE(true);
@@ -5325,7 +5952,7 @@ F4SE_PLUGIN_QUERY(const F4SE::QueryInterface* f4se, F4SE::PluginInfo* info)
     if (!f4se || !info) return false;
     info->infoVersion = F4SE::PluginInfo::kVersion;
     info->name = "DynamicCubemapF4";
-    info->version = REL::Version{1,4,0,0}.pack();
+    info->version = REL::Version{1,5,0,0}.pack();
     return !f4se->IsEditor() &&
         (f4se->RuntimeVersion() == REL::Version{1,10,163,0} ||
          f4se->RuntimeVersion() == REL::Version{1,10,984,0} ||

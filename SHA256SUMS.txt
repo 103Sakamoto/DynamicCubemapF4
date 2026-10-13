@@ -1,2 +1,0 @@
-0f79c85132175741649505c1746f2f42b66e2193afbf13bea334a421a532b4fc  DynamicCubemapF4-1.4.zip
-f72d2fa5d50c4e40abdf4febb72a21723eb52b6ad2cc97e33865e71af21fcc43  DynamicCubemapF4-1.4-source.zip

@@ -17,23 +17,6 @@
       "groupControl": 1
     },
     {
-      "id": "iSharpnessMode:General",
-      "type": "stepper",
-      "text": "Reflection sharpness",
-      "help": "Sharpest: mip 0 (128x128). Sharper: mip 1 (64x64). Neutral: mip 2 (32x32, default). Softer: mip 3 (16x16). Softest: mip 4 (8x8). Applies when gameplay resumes.",
-      "valueOptions": {
-        "sourceType": "ModSettingInt",
-        "options": [
-          "Sharpest",
-          "Sharper",
-          "Neutral",
-          "Softer",
-          "Softest"
-        ]
-      },
-      "groupCondition": 1
-    },
-    {
       "type": "section",
       "text": "Movement",
       "groupCondition": 1
@@ -42,7 +25,7 @@
       "id": "bReprojection:General",
       "type": "switcher",
       "text": "Reproject reflections while moving",
-      "help": "Adjust captured reflections as you move. Enabling this adds GPU work and may reduce FPS while moving. Disable it to reduce the performance cost. Changing this restarts movement history. Enabled by default.",
+      "help": "Adjust captured reflections as you move. Enabling this adds GPU work and may reduce FPS while moving. Disable it to reduce the performance cost. Changing this restarts movement history. Off by default.",
       "valueOptions": {
         "sourceType": "ModSettingBool"
       },
@@ -52,7 +35,7 @@
       "id": "bDiagnostics:General",
       "type": "switcher",
       "text": "Diagnostic mode",
-      "help": "Enable detailed logs, sampled performance timings and cache statistics for troubleshooting. Off by default. Disable for normal gameplay. Changes apply when gameplay resumes.",
+      "help": "Enable diagnostic logging and the in-game profiler. Off by default; graph and previews start hidden. Ctrl+F6 shows/hides the graph; Ctrl+F7 selects GPU/CPU; Ctrl+F10 shows/hides cubemap previews. With previews shown, Ctrl+F8 selects the preview mip and Ctrl+F9 selects RGB/confidence. Disable diagnostics for normal gameplay and FPS benchmarks. Applies when gameplay resumes.",
       "groupCondition": 1,
       "valueOptions": {
         "sourceType": "ModSettingBool"

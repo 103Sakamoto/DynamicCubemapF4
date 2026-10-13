@@ -19,6 +19,13 @@ std::vector<Pool> g_universalPools;
 std::unordered_map<int,int> g_universalViews,g_materialViewLookup;
 std::unordered_map<ID3D11ShaderResourceView*,Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>> g_universalNonCubeViews;
 std::uint64_t g_cacheHits=0,g_cacheMisses=0,g_cacheInserts=0,g_cacheEvictions=0;
+std::uint64_t g_cacheClockSteps=0;
+std::size_t g_cacheClockMax=0;
+struct TintSummaryStub {
+    std::string Report(ULONGLONG,bool) { return {}; }
+};
+TintSummaryStub g_tintTraceSummary;
+namespace DCFDiag { void Disable(){} }
 std::vector<std::string> logs;
 void Log(const std::string& s) { logs.push_back(s); }
 #include "../Source/src/PerformanceDiagnostics.h"
@@ -32,8 +39,9 @@ int main() {
     d.Format=DXGI_FORMAT_R16G16B16A16_FLOAT; assert(CacheTextureBytes(d)==1048560);
     d.Format=DXGI_FORMAT_BC1_UNORM; d.ArraySize=1; assert(CacheTextureBytes(d)==10936);
     d.Format=DXGI_FORMAT_UNKNOWN; assert(CacheTextureBytes(d)==0);
-    for(int i=0;i<4096;++i) { PerfHookScope scope; }
-    assert(g_perfHook.n==1);
+    for(int i=0;i<4096;++i) { PerfHookScope scope;scope.BeginDriver(); }
+    assert(g_perfHook.n==1 && g_perfHookProcessing.n==1 && g_perfHookDriver.n==1);
+    assert(std::abs(g_perfHook.sum-g_perfHookProcessing.sum-g_perfHookDriver.sum)<1e-9);
     for(int i=0;i<4;++i) { g_perfNextSample=0; PerfBeginCapture(); assert(g_perfActive>=0); PerfStage(1); PerfStage(2); PerfEndCapture(); }
     g_perfNextSample=0; PerfBeginCapture(); assert(g_perfActive==-1 && g_perfSkipped==1);
     // The harness flushes its otherwise idle device; production diagnostics never flush.
@@ -55,7 +63,7 @@ int main() {
     assert(logs[0].find("entries=2 uniqueResources=1")!=std::string::npos);
     assert(logs[0].find("referencedLogicalMiB_est=0.000977 unknownResources=0")!=std::string::npos);
     assert(logs.size()==3 && logs[0].find("PERF CACHE")!=std::string::npos);
-    assert(g_perfHook.n==0 && g_perfGPU[0].n==0);
+    assert(g_perfHook.n==0 && g_perfGPU[0].n==0 && g_perfHookProcessing.n==0 && g_perfHookDriver.n==0);
         SetDiagnosticsEnabled(false);
     PerfBeginCapture(); { PerfHookScope scope; } PerfTick(GetTickCount64()+60000);
     assert(g_perfCaptureCalls==0 && g_perfHookCalls==0 && g_perfActive==-1);

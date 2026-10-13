@@ -22,7 +22,8 @@ declarations = source[source.index("struct UniversalStyleConstants"):source.inde
     "Microsoft::WRL::ComPtr<ID3D11ComputeShader> g_universalReplicateCS;")]
 declarations += "\nbool g_universalComputeFailed=false; UINT g_universalTotalCubes=0;\n"
 declarations += "bool g_namedReferenceReady=false;\n"
-routines = "\n".join(function(signature) for signature in [
+routines = "template<class Builder> "+function("void LogDiagnostic(")
+routines += "\n".join(function(signature) for signature in [
     "void ResetNonCubeCache(", "void CacheNonCubeView(", "void RebuildMaterialViewLookup(", "ID3D11ShaderResourceView* CurrentMaterialView(", "bool UniversalIsOurs(", "void TagReflectionReplacement(",
     "BindingResult UniversalBind(", "void UniversalRepair(",
     "void SetLiveCubemapSlot(UINT slot, bool bound)\n", "void STDMETHODCALLTYPE Hook_PSResources(",

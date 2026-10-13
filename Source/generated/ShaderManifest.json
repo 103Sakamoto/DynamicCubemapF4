@@ -1,0 +1,160 @@
+{
+  "flags2": 0,
+  "compiler": "C:\\WINDOWS\\System32\\d3dcompiler_47.dll",
+  "compiler_sha256": "37c4abe91d6d888f4c7a85fe48d8088bb5cac0842f283d89871b677e10901c41",
+  "shaders": [
+    {
+      "name": "Capture",
+      "source_name": "StandaloneCSUpdateCubemapCS",
+      "entry": "main",
+      "macros": [
+        [
+          "SEPARATE_SKY_HISTORY",
+          "1"
+        ]
+      ],
+      "flags": 2048,
+      "target": "cs_5_0",
+      "source_sha256": "0627a44dd0affdedd131b54874d9ca4625bef08dabec6401c2d46bc747dd643d",
+      "bytes": 7508,
+      "bytecode_sha256": "b9b2cf546020d248d1983ee670e23f1bf13565595a1b02c977ec4b16068fa726"
+    },
+    {
+      "name": "InferLive",
+      "source_name": "StandaloneCSInferCubemapLiveLinearCS",
+      "entry": "main",
+      "macros": [
+        [
+          "SEPARATE_SKY_HISTORY",
+          "1"
+        ]
+      ],
+      "flags": 2048,
+      "target": "cs_5_0",
+      "source_sha256": "e9e4600f47327551b3e08d6fff22cc8abdfbef2a4a0ac8cfc43dcbd68b1a5f78",
+      "bytes": 3700,
+      "bytecode_sha256": "52106a8c79ea4d8f93a6beabe876cf6fdb67fcd9698e804f04790fea4d9b6773"
+    },
+    {
+      "name": "CaptureDirect",
+      "source_name": "StandaloneCSUpdateCubemapDirectCS",
+      "entry": "main",
+      "macros": [],
+      "flags": 2048,
+      "target": "cs_5_0",
+      "source_sha256": "0627a44dd0affdedd131b54874d9ca4625bef08dabec6401c2d46bc747dd643d",
+      "bytes": 7424,
+      "bytecode_sha256": "cbbd0859064f50bb334efd53a828d3d1a4e9e385c7b4d4ab8a4fca81bf3ef6e7"
+    },
+    {
+      "name": "InferDirect",
+      "source_name": "StandaloneCSInferCubemapDirectCS",
+      "entry": "main",
+      "macros": [],
+      "flags": 2048,
+      "target": "cs_5_0",
+      "source_sha256": "e9e4600f47327551b3e08d6fff22cc8abdfbef2a4a0ac8cfc43dcbd68b1a5f78",
+      "bytes": 3492,
+      "bytecode_sha256": "1047b6198689abf816b56b375b592564d4275ff215f2539677eef56a46aa4e36"
+    },
+    {
+      "name": "ReprojectDepthPass",
+      "source_name": "Reprojection",
+      "entry": "DepthPass",
+      "macros": [],
+      "flags": 34816,
+      "target": "cs_5_0",
+      "source_sha256": "5bec1df3311827dcac1ed05e7713ed39caa99c7e6144d082caae4d393b984130",
+      "bytes": 2468,
+      "bytecode_sha256": "fb7c6ee05aaa81d90d6a7bed9493afb5cbed03f980d90156d47a6a96686d36c2"
+    },
+    {
+      "name": "ReprojectOwnerPass",
+      "source_name": "Reprojection",
+      "entry": "OwnerPass",
+      "macros": [],
+      "flags": 34816,
+      "target": "cs_5_0",
+      "source_sha256": "5bec1df3311827dcac1ed05e7713ed39caa99c7e6144d082caae4d393b984130",
+      "bytes": 2704,
+      "bytecode_sha256": "294ed7bed5bdd386386d23a4ffee5fd5652898924bbb6c9cfcd40a0ac102790e"
+    },
+    {
+      "name": "ReprojectResolvePass",
+      "source_name": "Reprojection",
+      "entry": "ResolvePass",
+      "macros": [],
+      "flags": 34816,
+      "target": "cs_5_0",
+      "source_sha256": "5bec1df3311827dcac1ed05e7713ed39caa99c7e6144d082caae4d393b984130",
+      "bytes": 1680,
+      "bytecode_sha256": "8ad0feb62792e09d96b01e2e2e261384cf378c7d4c780c1883666a017444a3bb"
+    },
+    {
+      "name": "SkyColor",
+      "source_name": "DCF4SkyColorCS",
+      "entry": "main",
+      "macros": [],
+      "flags": 2048,
+      "target": "cs_5_0",
+      "source_sha256": "da4159b186c921f054a1e0885b89927aa730b192ed9e6fc2c698263b42864df1",
+      "bytes": 26492,
+      "bytecode_sha256": "cad9c813ec7f2f0af9b8d8aedd6396b65acfa50621408c90ad06c2567bf80434"
+    },
+    {
+      "name": "UniversalReplicate",
+      "source_name": "DCF4UniversalReplicateCS",
+      "entry": "main",
+      "macros": [],
+      "flags": 2048,
+      "target": "cs_5_0",
+      "source_sha256": "7c85f6e079bfb98bfd2d62603ba2097b65e93e1d52c6461915f228635c6f5724",
+      "bytes": 14756,
+      "bytecode_sha256": "6cb5a7fbf5ed37fb3cb26c53b41ad4b4fba7b1e36529d96fb89d96a79bd55af6"
+    },
+    {
+      "name": "TintProbe",
+      "source_name": "DCF4TintProbe",
+      "entry": "main",
+      "macros": [],
+      "flags": 2048,
+      "target": "cs_5_0",
+      "source_sha256": "c8bb6c7115d2cb6f62a09d6c6d1dd3f4183f995b2f25d1dc37be527157caddd3",
+      "bytes": 10084,
+      "bytecode_sha256": "b0e0030bcaebc55dce54345ac3c609c5b927628088d2ce00f7a478ea45783763"
+    },
+    {
+      "name": "Preview",
+      "source_name": "DCF4 previews",
+      "entry": "main",
+      "macros": [],
+      "flags": 2048,
+      "target": "cs_5_0",
+      "source_sha256": "24e92c12b11fd3d33f63a5d8d4a0450066466a59c644bcaabbe6ed2ba416657b",
+      "bytes": 2244,
+      "bytecode_sha256": "780ac4f1ea15cc2a0c05bd3df0f97b28a4ee2499f492e896cbdd24006e639b00"
+    },
+    {
+      "name": "ImGuiVertex",
+      "source_name": null,
+      "entry": "main",
+      "macros": [],
+      "flags": 0,
+      "target": "vs_4_0",
+      "source_sha256": "11d199555d27321c690d9557f98dc78199c58c8acabd1f76f2953fea3a1e28dc",
+      "bytes": 876,
+      "bytecode_sha256": "cf83ba82b89a66a3240499807352cdaee1e7a588482324b5dd7883282355c470"
+    },
+    {
+      "name": "ImGuiPixel",
+      "source_name": null,
+      "entry": "main",
+      "macros": [],
+      "flags": 0,
+      "target": "ps_4_0",
+      "source_sha256": "0e29b814efd93bdaa4ed4fd213b9dc829efd1e55a958109d2fc3f48fca2e5db0",
+      "bytes": 660,
+      "bytecode_sha256": "771ef2991729021e4701a5d413fa6f58876961227719e9d531df74cae3eb3366"
+    }
+  ]
+}

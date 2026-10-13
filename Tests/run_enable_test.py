@@ -6,6 +6,7 @@ def extract(sig):
  while n:n+=(s[e]=='{')-(s[e]=='}');e+=1
  return s[a:e]
 prefix='''#include <cassert>
+struct FallbackNotificationScope { explicit FallbackNotificationScope(const char*){} };
 namespace RE { struct NiTexture { int kind; }; }
 struct CellFallbackLoadScope { int kind=0; };
 thread_local CellFallbackLoadScope* g_cellFallbackScope=nullptr;
@@ -17,6 +18,7 @@ void SubmitCellFallback(CellFallbackLoadScope& s,const char*){assert(s.kind==1);
 void g_originalCellFallbackLoad(void*,RE::NiTexture*){++loads;}
 bool g_originalCellFallbackRead(void*,RE::NiTexture*,void*){++reads;return readResult;}
 '''
+prefix+='void AdoptLegacyNamedView(RE::NiTexture*,CellFallbackLoadScope&){}\n'
 main='''int main(){
  RE::NiTexture named{1},other{0}; CellFallbackLoadScope outer;g_cellFallbackScope=&outer;
  for(bool enabled:{false,true}) {g_requestedEnabled=enabled;

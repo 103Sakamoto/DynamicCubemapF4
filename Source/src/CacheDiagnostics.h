@@ -54,7 +54,11 @@ void ReportNonCubeCache() {
     Log("PERF CACHE: hits="+std::to_string(g_cacheHits)+" misses="+std::to_string(g_cacheMisses)+
         " hitPct="+(attempts?std::to_string(100.0*g_cacheHits/attempts):"NA")+
         " inserts="+std::to_string(g_cacheInserts)+" evictions="+std::to_string(g_cacheEvictions)+
+        " clockSteps="+std::to_string(g_cacheClockSteps)+" clockMax="+std::to_string(g_cacheClockMax)+ // BINDCPU
+        " buckets="+std::to_string(g_universalNonCubeViews.bucket_count())+ // BINDCPU
+        " loadFactor="+std::to_string(g_universalNonCubeViews.load_factor())+ // BINDCPU
         " entries="+std::to_string(g_universalNonCubeViews.size())+" uniqueResources="+std::to_string(seen.size())+
         " referencedLogicalMiB_est="+std::to_string(double(bytes)/1048576.0)+" unknownResources="+std::to_string(unknown));
     g_cacheHits=g_cacheMisses=g_cacheInserts=g_cacheEvictions=0;
+    g_cacheClockSteps=0;g_cacheClockMax=0; // BINDCPU
 }

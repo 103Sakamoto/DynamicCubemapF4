@@ -1,18 +1,31 @@
-# 1.4 validation
-Run run-local-tests.cmd for binding/cache/mip restoration, all five dispatch levels and disabled-startup observation. test-diagnostics.cmd uses a WARP D3D11 device. Scripts currently specify the development machine tool paths; adjust these for another installation. Older notes below are historical.
+# Current release tests
 
-# Developer checks
+Run `RUN_TESTS.cmd` from a Visual Studio x64 Developer Command Prompt, with Python 3.9+, Windows SDK, Visual Studio LLVM/clang++ and `DCF4_DETOURS` configured as in the main README. Set `DCF4_CLANG` if clang++ is not discoverable.
 
-`run_performance_test.py` extracts the current pool replication and rain draw routines. Its CPU mocks verify selected mip dispatch dimensions and bindings, state/reference restoration, tint upload reuse, dry/invalid/nonfinite/rain snapshots, and draw forwarding. Run with Python and a C++20 compiler selected through CXX. It does not test GPU output or the complete MCM view-creation transaction.
+The sequential runner reuses existing production extractions and CPU/WARP fixtures. It covers:
 
-These seven .cpp files are standalone extracted/mock tests, each with its own main() and mock platform objects. They are deliberately separate from Main.cpp and excluded from the xmake plugin target. They do not run in game and do not belong in a player download. Merging them into the plugin would introduce conflicting declarations/entry points.
+- Accepted source/dependency/license identity and all thirteen shader manifests; default diagnostics/reprojection/preview behavior.
+- Authored/peer binding ownership, refcounts, cache reuse, forwarding and disabled-startup reference observation.
+- Full-chain replication pixel equality, retained-original reuse and source invalidation.
+- Array streaming/upload/copy/discard epochs, incomplete/dark slots, stale probes and typed notification forwarding.
+- Embedded shader creation, rollback/retry, guarded ImGui bytecode and compiler-error build rejection.
+- Sky-only color masks, observed-radiance preservation, lifecycle/resource failures and graphics-state restoration.
+- Optional exterior sky history, interior exclusion and reprojection toggles.
+- Batched tint logging and zero sampled-clock/report activity when diagnostics is off.
+- The Community Shaders profiler query ring, focused dispatch counters, reset/failure handling and hidden preview gating.
 
-Compile each separately with a C++20 compiler and run it. They cover DDS loading, encoding, sampled matching, readiness/publication, recovery timing and candidate commit decisions. They are snapshots: changes to the production routines must also update the extracted test code. These checks do not exercise the real D3D11 driver or F4SE runtime.
+Output and logs go to `Tests/temp` or `Tests/bin`, excluded from packages and Git. Tests are separate programs, never plugin entry points. They do not launch Fallout 4, alter game files, or establish in-game correctness or hardware FPS.
 
-The additional `interop_test.cpp` uses `run_interop_test.py` to extract current
-production routines and compile them against the doubles in `interop_stubs`.
-Run `python3 Tests/run_interop_test.py` from the repository root with g++ available
-(or set CXX). Do not compile this test by itself or add its stub include path to
-the plugin build. See INTEROP_TEST.md for coverage and runtime limitations.
+Historical sibling-checkout diff scripts and generated native-code fixtures have been removed from the public tree. `release_scope.py` replaces those comparisons with an accepted-runtime hash manifest. Frozen reference HLSL remains test-only; runtime compilation is absent from the plugin.
 
-Run test-exterior-balance.cmd to compile extracted production classification/intensity expressions against CPU doubles. Updated interop tests cover exterior pool-capacity and publication fallback.
+## Optional runtime binary audit
+
+`RUN_TESTS.cmd --runtime-binaries` also verifies exact OG/NG renderer and streaming bodies and exercises typed adapters/Detours against temporary local fixtures. Supply these environment variables:
+
+- `DCF4_OG_EXE`: exact inspected OG executable matching `runtime-profiles/OG.json`.
+- `DCF4_OG_DATABASE`: matching OG Address Library file.
+- `DCF4_NG984_EXE`: exact unpacked inspection copy matching `runtime-profiles/NG984.json`.
+- `DCF4_NG984_DATABASE`: matching NG Address Library file.
+- `DCF4_ADDICTOL_DLL`: reviewed Addictol 1.7.0 DLL for the optional adapter test.
+
+The test checks file hashes before using the fixtures. It does not load or execute game/Addictol code. No such binaries are included. A packaged Steam executable can differ from the unpacked inspection file; do not bypass a failed hash check. See `docs/VALIDATION.md` for the distinction between binary auditing and gameplay results.

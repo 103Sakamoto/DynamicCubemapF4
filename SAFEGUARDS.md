@@ -1,16 +1,14 @@
 # Protection inventory
 
-Counted by purpose, not individual condition or polling loop: 10 groups in this release.
+1. Exact runtime and hook preflight rejects unsupported or altered routes.
+2. Gameplay activation recovery confirms active gameplay when a load notification was missed.
+3. Named fallback recovery uses bounded retries and validated source identity/format.
+4. Exterior identity/readiness retains original bindings while reference matching is pending or ambiguous.
+5. Standalone material analysis retains originals when data is unavailable and retries.
+6. Array analysis/publication preserves original texels for unresolved entries and validates streaming/write epochs before reuse.
+7. Partial resource/shader failures clean up and retain authored bindings; views, cubes and caches remain bounded.
+8. Capture/history checks validate camera, projection and movement, and reset on lifecycle changes, teleports and nonfinite data.
+9. Reflective-draw buffer overrides validate identity/data, restore the original binding and use bounded reconciliation.
+10. Compute passes restore previous shaders/class instances, resources, UAVs and constant buffers, retaining the existing peer-ownership protocol.
 
-1. Runtime and hook preflight: reject unsupported runtimes or unexpected hook sites.
-2. Gameplay activation recovery: confirm active gameplay if F4SE load notification was missed.
-3. Named fallback recovery: reopen DDS when the native texture reference is missing, or validate a replacement candidate after sustained invalid samples; bounded retries and input/format validation.
-4. Exterior identity and readiness: strict two-resolution sampled-content matching with per-candidate exclusion; block replacement while the reference is unready; preserve unresolved neutral array entries.
-5. Standalone analysis readiness: retain original bindings for unavailable data and retry.
-6. Array analysis and publication readiness: completed output stays bound during pending tint edits; initial output waits for analysis. preserve original texels for unavailable data; exempt positively identified exterior.
-7. Resource and compute failure handling: clean partial initialization, retain originals when replacement unavailable, cap cached views/cubes.
-8. Capture/history validity: fresh valid camera/projection checks, lifecycle reset, teleport/nonfinite movement history reset.
-9. Rain override isolation and tracking: validate frame buffer identity/size/data, override only recognized plugin reflection draws, restore original binding; bounded binding audits repair tracking.
-10. Graphics-state preservation: restore prior compute bindings and shader class instances after plugin passes.
-
-Limitations: these protections are not a complete recovery guarantee. Existing-invalid-reference recovery is implemented; actual GPU failure-path validation is still needed. No general capture-stall watchdog is included. Recent AE sessions were user-tested; the 1.3.1 repackaged build still needs a Windows rebuild and smoke test.
+These safeguards remain unchanged from the accepted candidate. They are not a guarantee of recovery from every driver failure or incompatible mod. Diagnostics queries collect without flushing; unknown texture-streaming hooks prevent event-only caching rather than weakening validation.

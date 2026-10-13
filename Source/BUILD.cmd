@@ -23,13 +23,18 @@ if not exist "%DCF4_DETOURS%\lib\detours.lib" (
     exit /b 1
 )
 
+if not defined DCF4_PYTHON set "DCF4_PYTHON=python"
+"%DCF4_PYTHON%" ..\tools\compile_shaders.py
+if errorlevel 1 exit /b 1
+
 call xmake f -p windows -a x64 -m releasedbg --toolchain=msvc --detours_root="%DCF4_DETOURS%"
 if errorlevel 1 exit /b %errorlevel%
 
 call xmake build -r DynamicCubemapF4
 if errorlevel 1 exit /b %errorlevel%
+if not exist "build\windows\x64\releasedbg\DynamicCubemapF4.dll" exit /b 1
 
 echo.
-echo DynamicCubemapF4 1.4.0 build completed. DLL:
+echo DynamicCubemapF4 1.5.0 build completed. DLL:
 echo %CD%\build\windows\x64\releasedbg\DynamicCubemapF4.dll
 exit /b 0

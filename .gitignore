@@ -1,8 +1,10 @@
-# Generated files
 **/build/
 **/.xmake/
 **/.vs/
+**/__pycache__/
 /dist/
+/Tests/temp/
+/Tests/bin/
 *.dll
 *.pdb
 *.obj

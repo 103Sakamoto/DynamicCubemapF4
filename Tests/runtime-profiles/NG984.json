@@ -1,0 +1,103 @@
+{
+  "runtime": "NG984",
+  "version": "1.10.984.0",
+  "exe_sha256": "5536332a8816abde7fd820e809d40c949a68cd9178772c3a69b222c9dc4870a9",
+  "database_sha256": "c13545f2dab806b7d19c5aa83a0d7524337b5afc89af79460f9915020e049d75",
+  "image_base": "0x140000000",
+  "vtable_rva": "0x2706208",
+  "deferred_rva": "0x2097e30",
+  "anchor_rva": "0x16fdba0",
+  "call_rva": "0x16fdc3a",
+  "draw_target_rva": "0x1708d50",
+  "renderer_rva": "0x3624ca0",
+  "world_rva": "0x303ac68",
+  "player_rva": "0x2f6b8f0",
+  "routes": [
+    {
+      "slot": 26,
+      "name": "LoadTexture",
+      "rva": "0x21192d0",
+      "prefix": "48895c2408574883ec60488bda488d4c",
+      "length": 207,
+      "sha256": "20b83fcf718e0bf903d110d023f3f5b1d01958bf9b6ad63fee526e399cb0c1c7"
+    },
+    {
+      "slot": 27,
+      "name": "CreateStreamingTexture",
+      "rva": "0x21193b0",
+      "prefix": "48895c24084889742410574883ec3048",
+      "length": 125,
+      "sha256": "a1893b0ebaddfc6d324ed6bd19a1c9519f63b823d8045ac682dde92b1f20a2c4"
+    },
+    {
+      "slot": 28,
+      "name": "ReadStreamingTextureData",
+      "rva": "0x2119440",
+      "prefix": "488b52384885d2740c488d0db0016501",
+      "length": 24,
+      "sha256": "ae49bc4322648b050ef1428fc26fb20fc2b8906fe8ed844fe52a5afca7398d74"
+    },
+    {
+      "slot": 29,
+      "name": "CreateStreamingTextureArraySlice",
+      "rva": "0x2119460",
+      "prefix": "48895c24084889742410574883ec3048",
+      "length": 129,
+      "sha256": "1182066feb655e70fb2cd0bad3ecaa0e30776f7144a5475648334fd4ad7c4474"
+    },
+    {
+      "slot": 30,
+      "name": "ReadStreamingTextureDataToArraySlice",
+      "rva": "0x21194f0",
+      "prefix": "488b52384885d2740c488d0d00016501",
+      "length": 24,
+      "sha256": "93673d3a403582e0a2816545f4ae13947fa47736c78df40aa90360d7c88e8127"
+    },
+    {
+      "slot": 31,
+      "name": "FinishStreamingTexture",
+      "rva": "0x2119510",
+      "prefix": "48895c2408574883ec20488b7a38488b",
+      "length": 116,
+      "sha256": "5291d7b8489e794302af1984177ca76e325a0becfad63d0496568c97de7df6a2"
+    },
+    {
+      "slot": 36,
+      "name": "UpdateTextureToDesiredMipLevel",
+      "rva": "0x2119620",
+      "prefix": "48895c24185556574883ec30488b6a38",
+      "length": 68,
+      "sha256": "09751bfef44cbcb8d906c9855f2b1857a979b32ccd2cddfe86d5696d60ed3ba4"
+    },
+    {
+      "slot": 37,
+      "name": "LoadUpgradeTextureData",
+      "rva": "0x2119720",
+      "prefix": "40534883ec50488bda4883c23048833a",
+      "length": 76,
+      "sha256": "022ebb1960d5d0dba71e8cb2fd0047beb319c59c1e59389f79a0419ac9f568a6"
+    },
+    {
+      "slot": 38,
+      "name": "UpdateStreamingTextureToDesiredMipLevel",
+      "rva": "0x2119780",
+      "prefix": "4c8bdc49895b0849896b184989732057",
+      "length": 269,
+      "sha256": "2d3769122c710d170258fb097b7b08f17b5122d5e5e37292b2403e9973fffd6b"
+    },
+    {
+      "slot": 39,
+      "name": "FinishStreamingTextureUpgrade",
+      "rva": "0x21198a0",
+      "prefix": "40534883ec20488bda488b52384885d2",
+      "length": 40,
+      "sha256": "47e39c668e665d37ee1adff1b587f2955ce989e717eb810d0f8070eb547f72b0"
+    }
+  ],
+  "deferred_prefix": "488bc4555356574154415541564157488da8c8f9ffff4881ecf80600000fb61d",
+  "anchor_prefix": "48895c240848896c2410488974241857415641574883ec408b0d0a9b5b02458b",
+  "draw-target_prefix": "48895c241055565741544155415641574883ec30448b055de95a02440fb6fa65",
+  "stream-ctor_prefix": "48895c240848896c2410488974241857415641574883ec20498bd9410fb6f848",
+  "executable_env": "DCF4_NG984_EXE",
+  "database_env": "DCF4_NG984_DATABASE"
+}
